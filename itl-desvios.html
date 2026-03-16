@@ -1,0 +1,1836 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ITL Desvios - Control de Inventario</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}body{background:#020617;color:#e2e8f0;font-family:sans-serif}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:#0f172a}::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}select,input,button{font-family:inherit}</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+    const Papa = window.Papa;
+
+const MONTHS = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+const CALC_METHODS = [
+  { id: "in_out", label: "IN + OUT" },
+  { id: "in_out_avg", label: "(IN + OUT) / 2" },
+  { id: "out_only", label: "Solo OUT" },
+  { id: "stock_teorico", label: "Stock Teórico (CYC)" },
+];
+const PENALTY_TYPES = [
+  { id: "none", label: "Sin penalidad" },
+  { id: "units", label: "Unidades" },
+  { id: "valued", label: "Valorizada (NC)" },
+];
+const YEARS = [2024, 2025, 2026, 2027, 2028];
+
+// ─── Stock Snapshot – fallback hardcoded (Mar 2026) ───
+const STOCK_SNAPSHOT_DEFAULT = {
+  client: "Pedidos Ya",
+  date: "Mar 2026",
+  lostThreshold: 1,
+  categories: [
+    { name: "BWS",                           stock: 1234434, lost: 17071, reubica: 3612,  rotura: 303,  lostVal: 44848431.00,  reubicaVal: 10339485.18, roturaVal: 812840.42   },
+    { name: "Beverages",                     stock: 1201041, lost: 19954, reubica: 2144,  rotura: 901,  lostVal: 17469787.80,  reubicaVal: 1896547.03,  roturaVal: 757301.71   },
+    { name: "Bread / Bakery",                stock: 14561,   lost: 300,   reubica: 402,   rotura: 0,    lostVal: 310645.37,    reubicaVal: 450354.05,   roturaVal: 0            },
+    { name: "Dairy / Chilled / Eggs",        stock: 555830,  lost: 15827, reubica: 2131,  rotura: 516,  lostVal: 16107851.37,  reubicaVal: 1831824.61,  roturaVal: 456478.68   },
+    { name: "Frozen",                        stock: 12,      lost: 0,     reubica: 12,    rotura: 0,    lostVal: 0,             reubicaVal: 22080.00,    roturaVal: 0            },
+    { name: "General Merchandise",           stock: 8792,    lost: 252,   reubica: 144,   rotura: 0,    lostVal: 475073.11,    reubicaVal: 212074.56,   roturaVal: 0            },
+    { name: "Home / Pet",                    stock: 993189,  lost: 26123, reubica: 9118,  rotura: 159,  lostVal: 44788669.26,  reubicaVal: 16982464.88, roturaVal: 380419.42   },
+    { name: "Packaged Foods",                stock: 1522065, lost: 43701, reubica: 19883, rotura: 297,  lostVal: 67136291.44,  reubicaVal: 26521866.44, roturaVal: 382301.36   },
+    { name: "Personal Care / Baby / Health", stock: 403759,  lost: 15131, reubica: 13696, rotura: 57,   lostVal: 40255207.59,  reubicaVal: 33337720.93, roturaVal: 1082082.38  },
+    { name: "Snacks",                        stock: 1299864, lost: 54726, reubica: 28258, rotura: 154,  lostVal: 51567752.88,  reubicaVal: 24964361.93, roturaVal: 156842.99   },
+    { name: "Smoking / Tobacco",             stock: 5122,    lost: 774,   reubica: 0,     rotura: 0,    lostVal: 1667939.79,   reubicaVal: 0,           roturaVal: 0            },
+    { name: "POP",                           stock: 5834481, lost: 27964, reubica: 0,     rotura: 31539,lostVal: 27964.00,     reubicaVal: 0,           roturaVal: 31539.00     },
+  ]
+};
+// ─── Stock Snapshot Southbay – Mar 2026 ───
+// INC00101 = pérdida contractual | Lost = transitoria operativa
+const SB_SNAPSHOT_DEFAULT = {
+  client: "Southbay",
+  date: "Mar 2026",
+  lostThreshold: 1,  // % máximo INC00101 + Lost sobre stock total
+  categories: [
+    { name: "APP", stock: 450012, inc: 126,  lost: 376, incVal: 0, lostVal: 0 },
+    { name: "EQP", stock: 199360, inc: 681,  lost: 266, incVal: 0, lostVal: 0 },
+    { name: "FTW", stock: 884727, inc: 362,  lost: 359, incVal: 0, lostVal: 0 },
+  ]
+};
+const fmt = n => (n != null && !isNaN(n)) ? Number(n).toLocaleString("es-AR") : "—";
+const fmtN = n => fmt(n);
+const fmtM = n => (n != null && !isNaN(n)) ? "$" + Math.abs(Number(n)).toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : "—";
+const fmtMS = n => { if (n == null || isNaN(n)) return "—"; const s = n < 0 ? "−" : n > 0 ? "+" : ""; return s + "$" + Math.abs(Number(n)).toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }; // signed
+const fmtM2 = n => (n != null && !isNaN(n)) ? "$" + Math.abs(Number(n)).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
+const abs = Math.abs;
+
+async function ld(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } }
+async function sv(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.error(e); } }
+
+// ─── Charts ───
+function MiniBar({ data, color, maxVal, height = 110, barWidth = 24, threshold, exceeds }) {
+  const [tooltip, setTooltip] = useState(null);
+  const w = data.length * (barWidth + 5) + 10, mx = maxVal || Math.max(...data.map(d => d.value), 0.01);
+  const tY = threshold != null ? height - (threshold / mx) * height : null;
+  return (
+    <svg width={w} height={height + 22} style={{ display: "block", overflow: "visible" }}>
+      {tY != null && tY >= 0 && tY <= height && <>
+        <line x1={0} y1={tY} x2={w} y2={tY} stroke="#f87171" strokeWidth="1.5" strokeDasharray="5 3" opacity={0.7} />
+        <text x={w - 3} y={tY - 3} textAnchor="end" fontSize="8" fill="#f87171" fontFamily="'DM Mono',monospace" opacity={0.85}>Tol {threshold.toFixed(2)}%</text>
+      </>}
+      {data.map((d, i) => {
+        const bh = Math.max((d.value / mx) * height, d.value > 0 ? 2 : 0), x = i * (barWidth + 5) + 5;
+        const ex = exceeds ? exceeds[i] : (threshold != null && d.value > threshold && d.value > 0);
+        const ttX = x + barWidth / 2, ttY = height - bh - 14;
+        return (<g key={i}
+          onMouseEnter={() => setTooltip({ i, x: ttX, y: ttY, label: d.label, value: d.value, ex })}
+          onMouseLeave={() => setTooltip(null)}
+          style={{ cursor: "default" }}>
+          <rect x={x} y={height - bh} width={barWidth} height={bh} rx={3} fill={ex ? "#f87171" : color} opacity={ex ? .95 : .85} />
+          {d.value > 0 && <text x={x + barWidth / 2} y={height - bh - 3} textAnchor="middle" fontSize="9" fill={ex ? "#f87171" : "#94a3b8"} fontWeight={ex ? 700 : 400} fontFamily="'DM Mono',monospace">{d.value.toFixed(2)}%</text>}
+          <text x={x + barWidth / 2} y={height + 12} textAnchor="middle" fontSize="8" fill="#64748b" fontFamily="'DM Mono',monospace">{d.label}</text>
+          {/* Invisible hover target covering full bar column */}
+          <rect x={x} y={0} width={barWidth} height={height + 22} fill="transparent" />
+        </g>);
+      })}
+      {/* Tooltip */}
+      {tooltip && (() => {
+        const tx = Math.min(tooltip.x, w - 60), ty = Math.max(tooltip.y - 28, 0);
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            <rect x={tx - 32} y={ty} width={70} height={22} rx={5}
+              fill="#0f172a" stroke={tooltip.ex ? "#f87171" : "#334155"} strokeWidth="1" opacity={0.97} />
+            <text x={tx + 3} y={ty + 9} textAnchor="middle" fontSize="9" fill="#64748b"
+              fontFamily="'DM Mono',monospace">{tooltip.label}</text>
+            <text x={tx + 3} y={ty + 19} textAnchor="middle" fontSize="10" fontWeight="700"
+              fill={tooltip.ex ? "#f87171" : "#e2e8f0"} fontFamily="'DM Mono',monospace">
+              {tooltip.value.toFixed(3)}%
+            </text>
+          </g>
+        );
+      })()}
+    </svg>
+  );
+}
+function Spark({ values, color, width = 130, height = 32 }) {
+  const v = values.filter(x => x != null); if (v.length < 2) return null;
+  const mn = Math.min(...v), mx = Math.max(...v), rg = mx - mn || 1;
+  return <svg width={width} height={height} style={{ display: "block" }}><polyline points={v.map((x, i) => `${(i / (v.length - 1)) * width},${height - ((x - mn) / rg) * (height - 4) - 2}`).join(" ")} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+function Badge({ value, threshold, small, nc, isValued, ajuste }) {
+  if (threshold == null || threshold <= 0) return null;
+  // For valorized: only exceeds if ajuste is negative AND nc > 0
+  // For units: only exceeds if ajuste is negative AND value > threshold
+  let ex;
+  if (isValued) {
+    ex = (nc || 0) > 0;
+  } else if (ajuste !== undefined) {
+    ex = ajuste < 0 && value > threshold;
+  } else {
+    ex = value > threshold;
+  }
+  return <span style={{ display: "inline-flex", alignItems: "center", padding: small ? "1px 5px" : "2px 7px", borderRadius: 5, fontSize: small ? 8 : 9, fontFamily: "'DM Mono',monospace", fontWeight: 600, background: ex ? "#f8717120" : "#34d39920", color: ex ? "#f87171" : "#34d399", marginLeft: 5 }}>{ex ? "⚠ EXCEDE" : "✓ OK"}</span>;
+}
+
+// ─── UI ───
+function Pill({ children, active, onClick }) { return <button onClick={onClick} style={{ padding: "5px 13px", borderRadius: 20, border: active ? "2px solid #c084fc" : "1.5px solid #334155", background: active ? "#c084fc18" : "transparent", color: active ? "#c084fc" : "#94a3b8", fontSize: 12, fontFamily: "'DM Mono',monospace", cursor: "pointer", fontWeight: active ? 600 : 400 }}>{children}</button>; }
+function IBtn({ onClick, children, danger }) { return <button onClick={onClick} style={{ background: "none", border: "none", cursor: "pointer", padding: 3, color: danger ? "#f87171" : "#64748b", fontSize: 15, lineHeight: 1 }}>{children}</button>; }
+function Modal({ open, onClose, title, children, width }) {
+  if (!open) return null;
+  return <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+    <div style={{ position: "absolute", inset: 0, background: "rgba(2,6,23,.7)", backdropFilter: "blur(4px)" }} />
+    <div onClick={e => e.stopPropagation()} style={{ position: "relative", background: "#0f172a", border: "1px solid #1e293b", borderRadius: 16, padding: "24px 28px", width: width || 520, maxWidth: "94vw", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,.5)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <h3 style={{ margin: 0, color: "#e2e8f0", fontFamily: "'Space Grotesk',sans-serif", fontSize: 17, fontWeight: 600 }}>{title}</h3>
+        <IBtn onClick={onClose}>✕</IBtn>
+      </div>
+      {children}
+    </div>
+  </div>;
+}
+function F({ label, value, onChange, type, placeholder, small, options, step, prefix, disabled }) {
+  const bs = { background: "#1e293b", border: "1px solid #334155", borderRadius: 7, color: "#e2e8f0", padding: "7px 11px", fontSize: 12, fontFamily: "'DM Mono',monospace", width: "100%", boxSizing: "border-box", outline: "none" };
+  return <div style={{ flex: small ? "0 0 auto" : 1, minWidth: small ? 80 : undefined }}>
+    {label && <label style={{ display: "block", fontSize: 10, color: "#64748b", marginBottom: 3, fontFamily: "'DM Mono',monospace" }}>{label}</label>}
+    {options ? <select value={value} onChange={e => onChange(e.target.value)} disabled={disabled} style={{ ...bs, cursor: "pointer" }}>{options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
+      : <div style={{ position: "relative" }}>{prefix && <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "#64748b", fontSize: 11 }}>{prefix}</span>}<input type={type || "text"} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} disabled={disabled} step={step} style={{ ...bs, paddingLeft: prefix ? 22 : 11 }} /></div>}
+  </div>;
+}
+function Btn({ children, onClick, primary, danger, small, disabled, accent }) {
+  return <button onClick={onClick} disabled={disabled} style={{ padding: small ? "5px 12px" : "8px 18px", borderRadius: 9, border: primary || accent ? "none" : danger ? "1.5px solid #f87171" : "1.5px solid #334155", background: primary ? "linear-gradient(135deg,#7c3aed,#a855f7)" : accent ? "linear-gradient(135deg,#0891b2,#22d3ee)" : "transparent", color: primary || accent ? "#fff" : danger ? "#f87171" : "#94a3b8", fontSize: small ? 11 : 12, fontFamily: "'DM Mono',monospace", fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1 }}>{children}</button>;
+}
+
+// ─── Stock Snapshot Panel ───
+function StockSnapshot({ clientName, snap, onUpdateSnap }) {
+  const [expanded, setExpanded] = useState(false);
+  const [sortBy, setSortBy] = useState("perdido");
+  if (!clientName || (!clientName.toLowerCase().includes("pedidos") && !clientName.toLowerCase().includes("southbay"))) return null;
+  if (!snap || !snap.categories || snap.categories.length === 0) return <div style={{padding:"12px 18px",background:"#0a1628",border:"1px solid #1e3a5f",borderRadius:13,fontSize:10,fontFamily:"'DM Mono',monospace",color:"#475569",marginBottom:20}}>📦 Foto de Stock · Sin datos cargados · <span style={{color:"#60a5fa",cursor:"pointer"}} onClick={onUpdateSnap}>📥 Cargar snapshot</span></div>;
+
+  const isSB = clientName.toLowerCase().includes("southbay");
+  const C = { purple: "#a855f7", rose: "#fb7185", emerald: "#34d399", amber: "#fbbf24", cyan: "#22d3ee", blue: "#60a5fa", orange: "#f97316" };
+  const fmtN = n => (n != null && !isNaN(n)) ? Number(n).toLocaleString("es-AR") : "—";
+  const fmtM = n => (n != null && !isNaN(n)) ? "$" + Math.abs(Number(n)).toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : "$0";
+
+  // ── Pedidos Ya mode ──
+  const cats = !isSB ? (snap.categories || []).map(c => {
+    const lost = Number(c.lost) || 0;
+    const reubica = Number(c.reubica) || 0;
+    const rotura = Number(c.rotura) || 0;
+    const stock = Number(c.stock) || 0;
+    const lostVal = Number(c.lostVal) || 0;
+    const reubicaVal = Number(c.reubicaVal) || 0;
+    const roturaVal = Number(c.roturaVal) || 0;
+    const perdidoU = lost + reubica;
+    const perdidoPct = stock > 0 ? (perdidoU / stock) * 100 : 0;
+    const perdidoVal = lostVal + reubicaVal;
+    const simAjusteVal = -(lostVal + reubicaVal + roturaVal);
+    const excede = perdidoPct > snap.lostThreshold;
+    return { ...c, stock, lost, reubica, rotura, lostVal, reubicaVal, roturaVal, perdidoU, perdidoPct, perdidoVal, simAjusteVal, excede };
+  }) : [];
+
+  const totStock = !isSB ? cats.reduce((s, c) => s + c.stock, 0) : (snap.categories || []).reduce((s, c) => s + (Number(c.stock)||0), 0);
+  const totLost = !isSB ? cats.reduce((s, c) => s + c.lost, 0) : 0;
+  const totReubica = !isSB ? cats.reduce((s, c) => s + c.reubica, 0) : 0;
+  const totRotura = !isSB ? cats.reduce((s, c) => s + c.rotura, 0) : 0;
+  const totPerdidoU = !isSB ? totLost + totReubica : 0;
+  const totPerdidoPct = !isSB && totStock > 0 ? (totPerdidoU / totStock) * 100 : 0;
+  const totPerdidoVal = !isSB ? cats.reduce((s, c) => s + c.perdidoVal, 0) : 0;
+  const totSimAjusteVal = !isSB ? cats.reduce((s, c) => s + c.simAjusteVal, 0) : 0;
+  const totExcede = !isSB ? totPerdidoPct > snap.lostThreshold : false;
+
+  const sorted = !isSB ? [...cats].sort((a, b) =>
+    sortBy === "perdido" ? b.perdidoPct - a.perdidoPct :
+    sortBy === "stock" ? b.stock - a.stock :
+    a.name.localeCompare(b.name)
+  ) : [];
+
+  // ── Southbay mode ──
+  const sbCats = isSB ? (snap.categories || []).map(c => {
+    const inc = Number(c.inc) || 0;
+    const lost = Number(c.lost) || 0;
+    const stock = Number(c.stock) || 0;
+    const totPerd = inc + lost;
+    const incPct  = stock > 0 ? (inc  / stock) * 100 : 0;
+    const lostPct = stock > 0 ? (lost / stock) * 100 : 0;
+    const totPerdPct = stock > 0 ? (totPerd / stock) * 100 : 0;
+    const excede = totPerdPct > snap.lostThreshold;
+    return { ...c, stock, inc, lost, totPerd, incPct, lostPct, totPerdPct, excede };
+  }) : [];
+  const sbTotStock  = isSB ? sbCats.reduce((s, c) => s + c.stock, 0) : 0;
+  const sbTotInc    = isSB ? sbCats.reduce((s, c) => s + (c.inc || 0), 0) : 0;
+  const sbTotLost   = isSB ? sbCats.reduce((s, c) => s + (c.lost || 0), 0) : 0;
+  const sbTotPerd   = sbTotInc + sbTotLost;
+  const sbTotPct    = sbTotStock > 0 ? (sbTotPerd / sbTotStock) * 100 : 0;
+  const sbTotExcede = sbTotPct > snap.lostThreshold;
+  const sbMaxPct    = isSB ? Math.max(...sbCats.map(c => c.totPerdPct), snap.lostThreshold * 1.5, 0.01) : 1;
+
+  const maxPct = !isSB ? Math.max(...cats.map(c => c.perdidoPct), snap.lostThreshold * 1.5) : sbMaxPct;
+  const displayExcede = isSB ? sbTotExcede : totExcede;
+  const displayPct = isSB ? sbTotPct : totPerdidoPct;
+
+  return (
+    <div style={{ marginBottom: 20, background: "#0a1628", border: "1px solid #1e3a5f", borderRadius: 13, overflow: "hidden" }}>
+      {/* Header */}
+      <div onClick={() => setExpanded(e => !e)} style={{ padding: "12px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "#0d1f3c", borderBottom: expanded ? "1px solid #1e3a5f" : "none" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 14 }}>📦</span>
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 13, color: "#e2e8f0" }}>Foto de Stock</span>
+          <span style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>
+            {snap.date} · {isSB ? "INC00101 + Lost" : "Lost + Reubica + Rotura"}
+          </span>
+          {displayExcede && <span style={{ fontSize: 8, padding: "2px 7px", borderRadius: 5, background: "#f8717120", color: "#f87171", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>⚠ SUPERA 1%</span>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>% STOCK PERDIDO</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: displayExcede ? "#f87171" : "#34d399" }}>{displayPct.toFixed(3)}%</div>
+          </div>
+          {!isSB && <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>SIM. IMPACTO $</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: "#fb7185" }}>−{fmtM(Math.abs(totSimAjusteVal))}</div>
+          </div>}
+          {onUpdateSnap && <button onClick={e => { e.stopPropagation(); onUpdateSnap(); }} style={{ padding: "4px 11px", borderRadius: 7, border: "1px solid #1e3a5f", background: "transparent", color: "#60a5fa", fontSize: 9, fontFamily: "'DM Mono',monospace", fontWeight: 600, cursor: "pointer" }}>📥 Actualizar</button>}
+          <span style={{ color: "#475569", fontSize: 14 }}>{expanded ? "▲" : "▼"}</span>
+        </div>
+      </div>
+
+      {expanded && (
+        <div style={{ padding: "16px 18px" }}>
+
+          {/* ── SOUTHBAY MODE ── */}
+          {isSB && (<>
+            {/* KPI cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(148px, 1fr))", gap: 9, marginBottom: 16 }}>
+              {[
+                { l: "Stock Total", v: fmtN(sbTotStock) + " u.", s: "APP + FTW + EQP", c: C.blue },
+                { l: "INC00101 Total", v: fmtN(sbTotInc) + " u.", s: "Pérdida contractual", c: C.rose },
+                { l: "Lost Total", v: fmtN(sbTotLost) + " u.", s: "Transitoria operativa", c: C.amber },
+                { l: "Perdido Total", v: fmtN(sbTotPerd) + " u.", s: "INC00101 + Lost", c: sbTotExcede ? C.rose : C.emerald },
+                { l: "% Stock Perdido", v: sbTotPct.toFixed(3) + "%", s: `Umbral ≤ ${snap.lostThreshold}%`, c: sbTotExcede ? C.rose : C.emerald, alert: sbTotExcede },
+              ].map((k, i) => (
+                <div key={i} style={{ background: "#0f172a", border: k.alert ? "1.5px solid #f87171" : "1px solid #1e293b", borderRadius: 11, padding: "11px 14px" }}>
+                  <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>{k.l}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: k.c }}>{k.v}</div>
+                  <div style={{ fontSize: 8, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 2 }}>{k.s}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Barra stacked INC + Lost por categoría */}
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "14px 16px", marginBottom: 14 }}>
+              <div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", marginBottom: 10 }}>
+                INC00101 vs Lost por Cía — % sobre stock
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 8, fontSize: 8, fontFamily: "'DM Mono',monospace" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}><div style={{ width: 10, height: 10, borderRadius: 2, background: C.rose, opacity: 0.85 }} /><span style={{ color: "#94a3b8" }}>INC00101 (contractual)</span></div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}><div style={{ width: 10, height: 10, borderRadius: 2, background: C.amber, opacity: 0.85 }} /><span style={{ color: "#94a3b8" }}>Lost (operativo)</span></div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}><div style={{ width: 16, height: 2, background: "#f87171", opacity: 0.7 }} /><span style={{ color: "#f87171" }}>Umbral {snap.lostThreshold}%</span></div>
+              </div>
+              {sbCats.map(cat => {
+                const incW  = Math.max((cat.incPct  / sbMaxPct) * 100, cat.inc > 0 ? 0.5 : 0);
+                const lostW = Math.max((cat.lostPct / sbMaxPct) * 100, cat.lost > 0 ? 0.5 : 0);
+                const thrW  = (snap.lostThreshold / sbMaxPct) * 100;
+                return (
+                  <div key={cat.name} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <div style={{ width: 40, fontSize: 9, color: "#94a3b8", fontFamily: "'DM Mono',monospace", textAlign: "right", flexShrink: 0, fontWeight: 600 }}>{cat.name}</div>
+                    <div style={{ flex: 1, position: "relative", height: 18 }}>
+                      {/* INC bar */}
+                      <div style={{ position: "absolute", top: 3, left: 0, height: 12, width: `${incW}%`, background: C.rose, borderRadius: "3px 0 0 3px", opacity: 0.85 }} />
+                      {/* Lost bar stacked */}
+                      <div style={{ position: "absolute", top: 3, left: `${incW}%`, height: 12, width: `${lostW}%`, background: C.amber, borderRadius: lostW > 0 ? "0 3px 3px 0" : 0, opacity: 0.85 }} />
+                      {/* threshold */}
+                      <div style={{ position: "absolute", top: 0, left: `${thrW}%`, height: 18, width: 1.5, background: "#f87171", opacity: 0.6 }} />
+                    </div>
+                    <div style={{ width: 52, fontSize: 9, fontFamily: "'DM Mono',monospace", fontWeight: 700, color: cat.excede ? C.rose : C.emerald, flexShrink: 0 }}>{cat.totPerdPct.toFixed(3)}%</div>
+                    <div style={{ width: 90, fontSize: 8, fontFamily: "'DM Mono',monospace", color: "#64748b", flexShrink: 0 }}>
+                      <span style={{ color: C.rose }}>I:{fmtN(cat.inc||0)}</span> <span style={{ color: C.amber }}>L:{fmtN(cat.lost||0)}</span>
+                    </div>
+                    {cat.excede && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 3, background: "#f8717120", color: "#f87171", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>⚠</span>}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Tabla detalle SB */}
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "12px 14px", overflowX: "auto" }}>
+              <div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", marginBottom: 8 }}>Detalle por Cía</div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: "'DM Mono',monospace" }}>
+                <thead><tr style={{ borderBottom: "1px solid #1e293b" }}>
+                  {["Cía","Stock","INC00101 (u.)","% INC","Lost (u.)","% Lost","Total Perdido","% Total","Estado"].map(h => (
+                    <th key={h} style={{ padding: "5px 8px", textAlign: h==="Cía"?"left":"right", color: "#475569", fontWeight: 500, fontSize: 8, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {sbCats.map((cat, i) => (
+                    <tr key={cat.name} style={{ borderBottom: "1px solid #0f172a", background: cat.excede ? "#f8717106" : i%2===0?"transparent":"#ffffff04" }}>
+                      <td style={{ padding: "5px 8px", color: "#e2e8f0", fontWeight: 700 }}>{cat.excede && "⚠ "}{cat.name}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: "#94a3b8" }}>{fmtN(cat.stock)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.rose }}>{fmtN(cat.inc||0)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.rose }}>{cat.incPct.toFixed(3)}%</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.amber }}>{fmtN(cat.lost||0)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.amber }}>{cat.lostPct.toFixed(3)}%</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: cat.excede ? C.rose : "#e2e8f0", fontWeight: 600 }}>{fmtN(cat.totPerd)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", fontWeight: 700, color: cat.excede ? C.rose : C.emerald }}>{cat.totPerdPct.toFixed(3)}%</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right" }}>
+                        <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 4, background: cat.excede?"#f8717120":"#34d39920", color: cat.excede?C.rose:C.emerald, fontWeight: 700 }}>{cat.excede?"⚠ EXCEDE":"✓ OK"}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot><tr style={{ borderTop: "2px solid #1e293b", background: "#1e293b10" }}>
+                  <td style={{ padding: "7px 8px", color: "#e2e8f0", fontWeight: 700 }}>TOTAL</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: "#e2e8f0", fontWeight: 700 }}>{fmtN(sbTotStock)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: C.rose, fontWeight: 700 }}>{fmtN(sbTotInc)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: C.rose, fontWeight: 700 }}>{sbTotStock > 0 ? (sbTotInc/sbTotStock*100).toFixed(3) : "0.000"}%</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: C.amber, fontWeight: 700 }}>{fmtN(sbTotLost)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: C.amber, fontWeight: 700 }}>{sbTotStock > 0 ? (sbTotLost/sbTotStock*100).toFixed(3) : "0.000"}%</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: sbTotExcede?C.rose:"#e2e8f0", fontWeight: 700 }}>{fmtN(sbTotPerd)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700, fontSize: 11, color: sbTotExcede?C.rose:C.emerald }}>{sbTotPct.toFixed(3)}%</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right" }}>
+                    <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 4, background: sbTotExcede?"#f8717120":"#34d39920", color: sbTotExcede?C.rose:C.emerald, fontWeight: 700 }}>{sbTotExcede?"⚠ EXCEDE":"✓ OK"}</span>
+                  </td>
+                </tr></tfoot>
+              </table>
+              <div style={{ marginTop: 8, fontSize: 8, fontFamily: "'DM Mono',monospace", color: "#475569" }}>
+                INC00101 = pérdida contractual (merma definitiva) · Lost = ubicación transitoria operativa (puede resolverse)
+              </div>
+            </div>
+          </>)}
+
+          {/* ── PEDIDOS YA MODE ── */}
+          {!isSB && (<>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 9, marginBottom: 18 }}>
+              {[
+                { l: "Stock Total", v: fmtN(totStock) + " u.", s: `${snap.categories.length} categorías`, c: C.blue },
+                { l: "Lost Total", v: fmtN(totLost) + " u.", s: fmtM(cats.reduce((s,c)=>s+c.lostVal,0)), c: C.rose },
+                { l: "Reubica Total", v: fmtN(totReubica) + " u.", s: fmtM(cats.reduce((s,c)=>s+c.reubicaVal,0)), c: C.amber },
+                { l: "Rotura Total", v: fmtN(totRotura) + " u.", s: fmtM(cats.reduce((s,c)=>s+c.roturaVal,0)), c: "#94a3b8" },
+                { l: "% Stock Perdido", v: totPerdidoPct.toFixed(3) + "%", s: `Umbral ≤ ${snap.lostThreshold}%`, c: totExcede ? C.rose : C.emerald, alert: totExcede },
+                { l: "Sim. Impacto $ Total", v: "−" + fmtM(Math.abs(totSimAjusteVal)), s: "Lost+Reubica+Rotura", c: C.rose },
+              ].map((k, i) => (
+                <div key={i} style={{ background: "#0f172a", border: k.alert ? "1.5px solid #f87171" : "1px solid #1e293b", borderRadius: 11, padding: "11px 14px" }}>
+                  <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>{k.l}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: k.c }}>{k.v}</div>
+                  <div style={{ fontSize: 8, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 2 }}>{k.s}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "14px 16px", marginBottom: 16, overflowX: "auto" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase" }}>% Stock Perdido por Categoría (Lost + Reubica)</span>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[["perdido","% Perdido"],["stock","Stock"],["name","A-Z"]].map(([v,l]) => (
+                    <button key={v} onClick={e => { e.stopPropagation(); setSortBy(v); }} style={{ padding: "2px 8px", borderRadius: 5, border: sortBy===v?"1.5px solid #a855f7":"1px solid #334155", background: sortBy===v?"#a855f718":"transparent", color: sortBy===v?"#a855f7":"#64748b", fontSize: 9, fontFamily:"'DM Mono',monospace", cursor:"pointer" }}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <div style={{ width: 24, height: 2, background: "#f87171", borderRadius: 1, opacity: 0.7 }} />
+                  <span style={{ fontSize: 8, color: "#f87171", fontFamily: "'DM Mono',monospace" }}>Umbral {snap.lostThreshold}%</span>
+                </div>
+                {sorted.map((cat, i) => {
+                  const barW = Math.max((cat.perdidoPct / maxPct) * 100, 0.3);
+                  const threshW = (snap.lostThreshold / maxPct) * 100;
+                  return (
+                    <div key={cat.name} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ width: 140, fontSize: 9, color: "#94a3b8", fontFamily: "'DM Mono',monospace", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cat.name}</div>
+                      <div style={{ flex: 1, position: "relative", height: 16 }}>
+                        <div style={{ position: "absolute", top: 2, left: 0, height: 12, width: `${barW}%`, background: cat.excede ? "#f87171" : "#34d399", borderRadius: 3, opacity: 0.85 }} />
+                        <div style={{ position: "absolute", top: 0, left: `${threshW}%`, height: 16, width: 1.5, background: "#f87171", opacity: 0.6 }} />
+                      </div>
+                      <div style={{ width: 60, fontSize: 9, fontFamily: "'DM Mono',monospace", fontWeight: 700, color: cat.excede ? "#f87171" : "#34d399", flexShrink: 0 }}>{cat.perdidoPct.toFixed(3)}%</div>
+                      <div style={{ width: 70, fontSize: 8, fontFamily: "'DM Mono',monospace", color: "#64748b", flexShrink: 0 }}>{fmtN(cat.perdidoU)} u.</div>
+                      {cat.excede && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 3, background: "#f8717120", color: "#f87171", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>⚠</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "12px 14px", overflowX: "auto" }}>
+              <div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", marginBottom: 10 }}>Detalle por Categoría</div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: "'DM Mono',monospace" }}>
+                <thead><tr style={{ borderBottom: "1px solid #1e293b" }}>
+                  {["Categoría","Stock","Lost (u.)","Reubica (u.)","Rotura (u.)","% Perdido","Valor Perdido $","Sim. −$ Ajuste"].map(h => (
+                    <th key={h} style={{ padding: "5px 8px", textAlign: h==="Categoría"?"left":"right", color: "#475569", fontWeight: 500, fontSize: 8, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {sorted.map((cat, i) => (
+                    <tr key={cat.name} style={{ borderBottom: "1px solid #0f172a", background: cat.excede ? "#f8717106" : i%2===0?"transparent":"#ffffff04" }}>
+                      <td style={{ padding: "5px 8px", color: "#e2e8f0", fontWeight: 600, whiteSpace: "nowrap" }}>{cat.excede && <span style={{ fontSize: 7, color: "#f87171" }}>⚠ </span>}{cat.name}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: "#94a3b8" }}>{fmtN(cat.stock)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.rose }}>{fmtN(cat.lost)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.amber }}>{fmtN(cat.reubica)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: "#64748b" }}>{fmtN(cat.rotura)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", fontWeight: 700, color: cat.excede ? C.rose : C.emerald }}>{cat.perdidoPct.toFixed(3)}%</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.rose }}>{fmtM(cat.perdidoVal)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: "#f87171", fontWeight: 600 }}>−{fmtM(Math.abs(cat.simAjusteVal))}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot><tr style={{ borderTop: "2px solid #1e293b", background: "#1e293b10" }}>
+                  <td style={{ padding: "7px 8px", color: "#e2e8f0", fontWeight: 700 }}>TOTAL</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: "#e2e8f0", fontWeight: 700 }}>{fmtN(totStock)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: C.rose, fontWeight: 700 }}>{fmtN(totLost)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: C.amber, fontWeight: 700 }}>{fmtN(totReubica)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: "#64748b", fontWeight: 700 }}>{fmtN(totRotura)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700, fontSize: 11, color: totExcede ? C.rose : C.emerald }}>{totPerdidoPct.toFixed(3)}%</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: C.rose, fontWeight: 700 }}>{fmtM(totPerdidoVal)}</td>
+                  <td style={{ padding: "7px 8px", textAlign: "right", color: "#f87171", fontWeight: 700 }}>−{fmtM(Math.abs(totSimAjusteVal))}</td>
+                </tr></tfoot>
+              </table>
+            </div>
+          </>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Proyección NC – Ajuste Acumulado + Impacto Snapshot ───
+function ProyeccionNC({ clientName, catData, records, clients, selYr, periodRecs, periodMonths, isV, snap }) {
+  const [expanded, setExpanded] = useState(true);
+  const TOL_PROY = 0.001; // 0.1%
+  const C = { purple: "#a855f7", rose: "#fb7185", emerald: "#34d399", amber: "#fbbf24", cyan: "#22d3ee", blue: "#60a5fa", orange: "#f97316" };
+  const fmtN = n => (n != null && !isNaN(n)) ? Number(n).toLocaleString("es-AR") : "—";
+  const fmtM = n => (n != null && !isNaN(n)) ? "$" + Math.abs(Number(n)).toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 }) : "$0";
+  const fmtMS = n => { if (n == null || isNaN(n)) return "—"; const s = n < 0 ? "−" : n > 0 ? "+" : ""; return s + "$" + Math.abs(Number(n)).toLocaleString("es-AR", { minimumFractionDigits: 0, maximumFractionDigits: 0 }); };
+
+  if (!clientName || !clientName.toLowerCase().includes("pedidos")) return null;
+
+  if (!snap) return null;
+  const clObj = clients.find(c => c.name.toLowerCase().includes("pedidos"));
+  if (!clObj) return null;
+
+  // Acumular $Ajuste y $OUT por categoría desde los registros del dashboard
+  const clRecs = periodRecs(clObj.id, selYr, records);
+  const adjByCat = {}, outByCat = {};
+  clRecs.forEach(r => {
+    const cat = (r.category && r.category !== "_total") ? r.category : null;
+    if (!cat) return;
+    if (!adjByCat[cat]) { adjByCat[cat] = 0; outByCat[cat] = 0; }
+    adjByCat[cat] += r.costoAjuste || 0;
+    outByCat[cat] += r.costoFlowOut || 0;
+  });
+  // Total $Ajuste y $OUT (registros _total o suma)
+  const totAdjDash = clRecs.reduce((s, r) => s + (r.costoAjuste || 0), 0);
+  const totOutDash  = clRecs.reduce((s, r) => s + (r.costoFlowOut || 0), 0);
+
+  // Construir filas por categoría del snapshot
+  const rows = snap.categories.map(sc => {
+    const simImpacto = -(sc.lostVal + sc.reubicaVal + sc.roturaVal); // siempre negativo
+    const adjDash    = adjByCat[sc.name] || 0;
+    const outDash    = outByCat[sc.name] || 0;
+    const adjProy    = adjDash + simImpacto;          // combinado
+    const allowance  = TOL_PROY * Math.abs(outDash);  // 0.1% × $OUT
+    const hasOut     = outDash > 0;
+
+    let nc = 0, estado = "ok";
+    if (adjProy >= 0) {
+      estado = "positivo"; // favorable, sin penalidad
+    } else if (!hasOut) {
+      estado = "sin_out";  // no hay base para calcular allowance
+    } else {
+      const excedente = Math.abs(adjProy) - allowance;
+      if (excedente > 0) { nc = excedente; estado = "nc"; }
+      else { estado = "dentro_tol"; }
+    }
+    return { name: sc.name, adjDash, simImpacto, adjProy, outDash, allowance, nc, estado, hasOut };
+  });
+
+  // Totales generales (usando suma de _total o suma cruda)
+  const totSimImpacto = snap.categories.reduce((s, c) => s - (c.lostVal + c.reubicaVal + c.roturaVal), 0);
+  const totAdjProy    = totAdjDash + totSimImpacto;
+  const totAllowance  = TOL_PROY * Math.abs(totOutDash);
+  const totNC         = totAdjProy < 0 ? Math.max(0, Math.abs(totAdjProy) - totAllowance) : 0;
+  const totEstado     = totAdjProy >= 0 ? "positivo" : totNC > 0 ? "nc" : "dentro_tol";
+
+  const sumNCCats   = rows.reduce((s, r) => s + r.nc, 0); // suma de NC individuales por cat. (los valores rojos)
+
+  const colorEstado = e => e === "positivo" ? C.emerald : e === "nc" ? C.rose : e === "dentro_tol" ? C.cyan : "#64748b";
+  const labelEstado = e => e === "positivo" ? "✓ Favorable" : e === "nc" ? "⚠ NC Proy." : e === "dentro_tol" ? "✓ Dentro tol." : "Sin $OUT";
+
+  const maxAbsAdj = Math.max(...rows.map(r => Math.abs(r.adjProy)), Math.abs(totAdjProy), 1);
+
+  return (
+    <div style={{ marginBottom: 20, background: "#0f1a2e", border: "1px solid #1e3a5f", borderRadius: 13, overflow: "hidden" }}>
+      {/* Header colapsable */}
+      <div
+        onClick={() => setExpanded(e => !e)}
+        style={{ padding: "12px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "#0d1f3c", borderBottom: expanded ? "1px solid #1e3a5f" : "none" }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 14 }}>🔮</span>
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 13, color: "#e2e8f0" }}>Proyección NC</span>
+          <span style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>Ajuste acum. + Sim. Stock · Tol. 0,1% s/ $OUT</span>
+          {totEstado === "nc" && <span style={{ fontSize: 8, padding: "2px 7px", borderRadius: 5, background: "#f8717120", color: "#f87171", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>⚠ NC PROYECTADA</span>}
+          {totEstado === "positivo" && <span style={{ fontSize: 8, padding: "2px 7px", borderRadius: 5, background: "#34d39920", color: "#34d399", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>✓ FAVORABLE</span>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>ADJ. PROY. TOTAL</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: totAdjProy >= 0 ? C.emerald : C.rose }}>{fmtMS(totAdjProy)}</div>
+          </div>
+          {sumNCCats > 0 && <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>NC PROY. TOTAL</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: C.rose }}>{fmtM(sumNCCats)}</div>
+          </div>}
+          <span style={{ color: "#475569", fontSize: 14 }}>{expanded ? "▲" : "▼"}</span>
+        </div>
+      </div>
+
+      {expanded && (
+        <div style={{ padding: "16px 18px" }}>
+          {/* KPI resumen total */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(148px, 1fr))", gap: 9, marginBottom: 18 }}>
+            {[
+              { l: "Ajuste Acum. Dashboard", v: fmtMS(totAdjDash), c: totAdjDash >= 0 ? C.emerald : C.rose, s: "Σ $Ajuste registros" },
+              { l: "Sim. Impacto Snapshot", v: fmtMS(totSimImpacto), c: C.rose, s: "Lost+Reubica+Rotura −$" },
+              { l: "Ajuste Proyectado", v: fmtMS(totAdjProy), c: totAdjProy >= 0 ? C.emerald : C.rose, s: "Dashboard + Snapshot", alert: totAdjProy < 0 },
+              { l: "Allowance Total (0,1%)", v: totOutDash > 0 ? fmtM(totAllowance) : "Sin $OUT", c: C.cyan, s: `0,1% × ${fmtM(Math.abs(totOutDash))}` },
+              { l: "NC Proyectada", v: sumNCCats > 0 ? fmtM(sumNCCats) : "—", c: sumNCCats > 0 ? C.rose : C.emerald, s: sumNCCats > 0 ? "Σ excedentes por categoría" : "Dentro de tolerancia", alert: sumNCCats > 0 },
+            ].map((k, i) => (
+              <div key={i} style={{ background: "#0f172a", border: k.alert ? "1.5px solid #f87171" : "1px solid #1e293b", borderRadius: 11, padding: "11px 14px" }}>
+                <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>{k.l}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: k.c }}>{k.v}</div>
+                <div style={{ fontSize: 8, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 2 }}>{k.s}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Waterfall visual: dashboard → snapshot → proyectado */}
+          <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "14px 16px", marginBottom: 16 }}>
+            <div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", marginBottom: 12 }}>Composición del Ajuste Proyectado por Categoría</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {/* header labels */}
+              <div style={{ display: "grid", gridTemplateColumns: "150px 1fr 80px 80px 80px 90px", gap: 6, fontSize: 7, color: "#475569", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", paddingBottom: 4, borderBottom: "1px solid #1e293b" }}>
+                <div>Categoría</div><div>Ajuste Proyectado</div><div style={{ textAlign: "right" }}>Adj.Dashboard</div><div style={{ textAlign: "right" }}>Sim.Snapshot</div><div style={{ textAlign: "right" }}>Allowance</div><div style={{ textAlign: "right" }}>NC Proy.</div>
+              </div>
+              {rows.map((r, i) => {
+                const barWProy = Math.min((Math.abs(r.adjProy) / maxAbsAdj) * 100, 100);
+                const isPos = r.adjProy >= 0;
+                return (
+                  <div key={r.name} style={{ display: "grid", gridTemplateColumns: "150px 1fr 80px 80px 80px 90px", gap: 6, alignItems: "center", padding: "4px 0", borderBottom: "1px solid #0f172a" }}>
+                    <div style={{ fontSize: 9, color: r.estado === "nc" ? C.rose : "#94a3b8", fontFamily: "'DM Mono',monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: r.estado === "nc" ? 700 : 400 }}>
+                      {r.estado === "nc" && "⚠ "}{r.name}
+                    </div>
+                    <div style={{ position: "relative", height: 14 }}>
+                      <div style={{ position: "absolute", top: 1, left: 0, height: 12, width: `${barWProy}%`, background: isPos ? "#34d39960" : r.estado === "nc" ? "#f8717160" : "#22d3ee50", borderRadius: 3 }} />
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: r.adjDash >= 0 ? C.emerald : C.rose }}>{r.adjDash ? fmtMS(r.adjDash) : <span style={{ color: "#334155" }}>—</span>}</div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.rose }}>{fmtMS(r.simImpacto)}</div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: r.hasOut ? C.cyan : "#334155" }}>{r.hasOut ? fmtM(r.allowance) : "—"}</div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", fontWeight: 700 }}>
+                      {r.estado === "nc" ? <span style={{ color: C.rose }}>{fmtM(r.nc)}</span>
+                       : r.estado === "positivo" ? <span style={{ color: C.emerald, fontSize: 8 }}>Favorable</span>
+                       : r.estado === "dentro_tol" ? <span style={{ color: C.cyan, fontSize: 8 }}>Dentro tol.</span>
+                       : <span style={{ color: "#334155", fontSize: 8 }}>Sin $OUT</span>}
+                    </div>
+                  </div>
+                );
+              })}
+              {/* Total row – NC es suma de los valores rojos individuales por categoría */}
+              {(() => {
+                const sumNCCats = rows.reduce((s, r) => s + r.nc, 0);
+                return (
+                  <div style={{ display: "grid", gridTemplateColumns: "150px 1fr 80px 80px 80px 90px", gap: 6, alignItems: "center", padding: "8px 0 2px 0", borderTop: "2px solid #1e293b", marginTop: 2 }}>
+                    <div style={{ fontSize: 9, color: "#e2e8f0", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>TOTAL</div>
+                    <div />
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: totAdjDash >= 0 ? C.emerald : C.rose, fontWeight: 700 }}>{fmtMS(totAdjDash)}</div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.rose, fontWeight: 700 }}>{fmtMS(totSimImpacto)}</div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: totOutDash > 0 ? C.cyan : "#334155", fontWeight: 700 }}>{totOutDash > 0 ? fmtM(totAllowance) : "—"}</div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
+                      {sumNCCats > 0
+                        ? <><span style={{ fontSize: 11, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: C.rose }}>{fmtM(sumNCCats)}</span><span style={{ fontSize: 7, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>Σ NC por cat.</span></>
+                        : <span style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", fontWeight: 700, color: C.emerald }}>Sin NC</span>
+                      }
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Nota metodológica */}
+          <div style={{ background: "#1e293b20", border: "1px solid #1e293b", borderRadius: 9, padding: "10px 14px", fontSize: 9, fontFamily: "'DM Mono',monospace", color: "#475569", lineHeight: 1.6 }}>
+            <span style={{ color: "#64748b", fontWeight: 600 }}>Metodología: </span>
+            Ajuste Proyectado = $Ajuste acumulado (dashboard) + Simulación impacto snapshot (Lost+Reubica+Rotura en negativo).
+            Allowance = 0,1% × $OUT acumulado por categoría. Si Ajuste Proyectado ≥ 0 → sin penalidad.
+            Si negativo y |Ajuste Proyectado| &gt; Allowance → NC Proyectada = diferencia excedente.
+            {!totOutDash && <span style={{ color: C.amber }}> ⚠ Sin registros de $OUT cargados en el dashboard: allowances en $0.</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Proyección Penalidad Southbay ───
+function ProyeccionSB({ clientName, records, clients, selYr, periodRecs, sbSnapshot }) {
+  const [expanded, setExpanded] = useState(true);
+  const [includeLost, setIncludeLost] = useState(true);
+  const TOL_SB = 0.00125; // 0,125%
+  const C = { rose: "#fb7185", emerald: "#34d399", amber: "#fbbf24", cyan: "#22d3ee", blue: "#60a5fa", purple: "#a855f7" };
+  const fmtN = n => (n != null && !isNaN(n)) ? Number(n).toLocaleString("es-AR") : "—";
+
+  if (!clientName || !clientName.toLowerCase().includes("southbay")) return null;
+  const clObj = clients.find(c => c.name.toLowerCase().includes("southbay"));
+  if (!clObj) return null;
+
+  // Ajuste acumulado por Cía desde los registros del dashboard
+  const clRecs = records.filter(r => r.clientId === clObj.id && r.year === selYr && !r.isPeriod);
+  const periodRecs2 = records.filter(r => r.clientId === clObj.id && r.year === selYr && r.isPeriod);
+  const adjByCia = {}, stByCia = {};
+  // Registros mensuales: acumula ajuste y ST mes a mes
+  clRecs.forEach(r => {
+    const cat = (r.category && r.category !== "_total") ? r.category : null;
+    if (!cat) return;
+    if (!adjByCia[cat]) { adjByCia[cat] = 0; stByCia[cat] = 0; }
+    adjByCia[cat] += r.ajuste || 0;
+    stByCia[cat]  += Number(r.stockTeorico) || 0;
+  });
+  // Registros de período (ej: "2026 - Primer semestre"): ST ya viene acumulado, no suma mes a mes
+  // Solo sobreescribe stByCia si no hay datos mensuales para esa Cía
+  periodRecs2.forEach(r => {
+    const cat = (r.category && r.category !== "_total") ? r.category : null;
+    if (!cat) return;
+    if (!adjByCia[cat]) adjByCia[cat] = 0;
+    adjByCia[cat] += r.ajuste || 0;
+    // ST de período: si ya hay ST mensual acumulado, ignorar; si no, usar el del período
+    if (!stByCia[cat]) stByCia[cat] = Number(r.stockTeorico) || 0;
+  });
+  const totAdjDash = [...clRecs, ...periodRecs2].reduce((s, r) => s + (r.ajuste || 0), 0);
+  const totSTDash  = Object.values(stByCia).reduce((s, v) => s + v, 0);
+
+  const getSTCia = cia => stByCia[cia] || 0;
+  const getTotST = totSTDash;
+
+  // Snapshot: INC + Lost por Cía (unidades simuladas a ajustar en negativo)
+  const snapCats = (sbSnapshot && sbSnapshot.categories) ? sbSnapshot.categories : [];
+
+  // Construir filas por Cía
+  const cias = [...new Set([
+    ...Object.keys(adjByCia),
+    ...snapCats.map(c => c.name)
+  ])].filter(Boolean);
+
+  const rows = cias.map(cia => {
+    const snapCat = snapCats.find(c => c.name === cia) || {};
+    const simImpacto  = -(Number(snapCat.inc || 0) + (includeLost ? Number(snapCat.lost || 0) : 0));
+    const adjDash     = adjByCia[cia] || 0;
+    const stTeorico   = getSTCia(cia);
+    const adjProy     = adjDash + simImpacto;          // unidades
+    const allowance   = TOL_SB * stTeorico;            // 0,125% × Stock Teórico
+    const hasST       = stTeorico > 0;
+    const incU        = Number(snapCat.inc  || 0);
+    const lostU       = Number(snapCat.lost || 0);
+
+    let pen = 0, estado = "ok";
+    if (adjProy >= 0) {
+      estado = "positivo";
+    } else if (!hasST) {
+      estado = "sin_st";
+    } else {
+      const excedente = Math.abs(adjProy) - allowance;
+      if (excedente > 0) { pen = excedente; estado = "pen"; }
+      else { estado = "dentro_tol"; }
+    }
+    return { cia, adjDash, simImpacto, adjProy, stTeorico, allowance, pen, estado, hasST, incU, lostU };
+  });
+
+  const sumPenCias  = rows.reduce((s, r) => s + r.pen, 0);
+  const totSimImpacto = rows.reduce((s, r) => s + r.simImpacto, 0);
+  const totLostSim = rows.reduce((s, r) => s + r.lostU, 0);
+  const totAdjProy    = totAdjDash + totSimImpacto;
+  const totAllowance  = TOL_SB * getTotST;
+  const totEstado     = totAdjProy >= 0 ? "positivo" : sumPenCias > 0 ? "pen" : "dentro_tol";
+  const maxAbsAdj     = Math.max(...rows.map(r => Math.abs(r.adjProy)), Math.abs(totAdjProy), 1);
+
+  return (
+    <div style={{ marginBottom: 20, background: "#0f1a2e", border: "1px solid #1e3a5f", borderRadius: 13, overflow: "hidden" }}>
+      {/* Header */}
+      <div onClick={() => setExpanded(e => !e)} style={{ padding: "12px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "#0d1f3c", borderBottom: expanded ? "1px solid #1e3a5f" : "none" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 14 }}>🔮</span>
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 13, color: "#e2e8f0" }}>Proyección Penalidad</span>
+          <span style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>Ajuste acum. + Sim. INC+Lost · Tol. 0,125% s/ Stock Teórico</span>
+          {totEstado === "pen"      && <span style={{ fontSize: 8, padding: "2px 7px", borderRadius: 5, background: "#f8717120", color: "#f87171", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>⚠ EXCEDE TOL.</span>}
+          {totEstado === "positivo" && <span style={{ fontSize: 8, padding: "2px 7px", borderRadius: 5, background: "#34d39920", color: "#34d399", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>✓ FAVORABLE</span>}
+          {totEstado === "dentro_tol" && <span style={{ fontSize: 8, padding: "2px 7px", borderRadius: 5, background: "#22d3ee20", color: "#22d3ee", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>✓ DENTRO TOL.</span>}
+          {/* Toggle Lost */}
+          <div onClick={e => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 4, background: "#0f172a", borderRadius: 7, padding: "3px 4px", border: "1px solid #1e293b" }}>
+            {[["inc_only","Solo INC"],["inc_lost","INC + Lost"]].map(([v,l]) => (
+              <button key={v} onClick={() => setIncludeLost(v === "inc_lost")}
+                style={{ padding: "2px 8px", borderRadius: 5, border: "none", fontSize: 8, fontFamily: "'DM Mono',monospace", fontWeight: 600, cursor: "pointer",
+                  background: (v === "inc_lost") === includeLost ? "#3b82f6" : "transparent",
+                  color:      (v === "inc_lost") === includeLost ? "#fff" : "#64748b" }}>
+                {l}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>ADJ. PROY. TOTAL</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: totAdjProy >= 0 ? C.emerald : C.rose }}>
+              {totAdjProy >= 0 ? "+" : ""}{fmtN(totAdjProy)} u.
+            </div>
+          </div>
+          {sumPenCias > 0 && <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>EXCEDENTE TOTAL</div>
+            <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: C.rose }}>{fmtN(Math.ceil(sumPenCias))} u.</div>
+          </div>}
+          <span style={{ color: "#475569", fontSize: 14 }}>{expanded ? "▲" : "▼"}</span>
+        </div>
+      </div>
+
+      {expanded && (
+        <div style={{ padding: "16px 18px" }}>
+          {/* KPI cards */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(148px, 1fr))", gap: 9, marginBottom: 16 }}>
+            {[
+              { l: "Ajuste Acum. (u.)", v: (totAdjDash >= 0 ? "+" : "") + fmtN(totAdjDash) + " u.", c: totAdjDash >= 0 ? C.emerald : C.rose, s: "Registros cargados" },
+              { l: includeLost ? "Sim. INC+Lost (u.)" : "Sim. INC00101 (u.)", v: fmtN(totSimImpacto) + " u.", c: C.rose, s: includeLost ? "INC00101 + Lost en negativo" : "Solo INC00101 (Lost excluido)" },
+              { l: "Ajuste Proyectado", v: (totAdjProy >= 0 ? "+" : "") + fmtN(totAdjProy) + " u.", c: totAdjProy >= 0 ? C.emerald : C.rose, s: "Acum. + Simulación", alert: totAdjProy < 0 },
+              { l: "Stock Teórico", v: totSTDash > 0 ? fmtN(getTotST) + " u." : "Sin datos", c: totSTDash > 0 ? C.blue : "#475569", s: totSTDash > 0 ? "Suma acum. registros" : "Importá el archivo de ajustes" },
+              { l: "Allowance (0,125%)", v: fmtN(Math.round(totAllowance)) + " u.", c: C.cyan, s: "0,125% × ST" },
+              { l: "Excedente Total", v: sumPenCias > 0 ? fmtN(Math.ceil(sumPenCias)) + " u." : "—", c: sumPenCias > 0 ? C.rose : C.emerald, s: sumPenCias > 0 ? "Σ excedentes por Cía" : "Dentro de tolerancia", alert: sumPenCias > 0 },
+            ].map((k, i) => (
+              <div key={i} style={{ background: "#0f172a", border: k.alert ? "1.5px solid #f87171" : "1px solid #1e293b", borderRadius: 11, padding: "11px 14px" }}>
+                <div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>{k.l}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: k.c }}>{k.v}</div>
+                <div style={{ fontSize: 8, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 2 }}>{k.s}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Tabla por Cía */}
+          <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "12px 14px", marginBottom: 14, overflowX: "auto" }}>
+            <div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", marginBottom: 10 }}>Composición por Cía</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+              {/* Header */}
+              <div style={{ display: "grid", gridTemplateColumns: "50px 1fr 90px 90px 90px 80px 90px 90px", gap: 6, fontSize: 7, color: "#475569", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", paddingBottom: 6, borderBottom: "1px solid #1e293b", alignItems: "center" }}>
+                <div>Cía</div><div>Ajuste Proyectado</div>
+                <div style={{ textAlign: "right" }}>Adj.Acum.</div>
+                <div style={{ textAlign: "right" }}>INC (u.)</div>
+                <div style={{ textAlign: "right" }}>Lost (u.)</div>
+                <div style={{ textAlign: "right" }}>ST</div>
+                <div style={{ textAlign: "right" }}>Allowance</div>
+                <div style={{ textAlign: "right" }}>Excedente</div>
+              </div>
+              {rows.map((r, i) => {
+                const barW = Math.min((Math.abs(r.adjProy) / maxAbsAdj) * 100, 100);
+                const isPos = r.adjProy >= 0;
+                return (
+                  <div key={r.cia} style={{ display: "grid", gridTemplateColumns: "50px 1fr 90px 90px 90px 80px 90px 90px", gap: 6, alignItems: "center", padding: "6px 0", borderBottom: "1px solid #0f172a" }}>
+                    <div style={{ fontSize: 10, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: r.estado === "pen" ? C.rose : "#e2e8f0" }}>
+                      {r.estado === "pen" && "⚠ "}{r.cia}
+                    </div>
+                    <div style={{ position: "relative", height: 14 }}>
+                      <div style={{ position: "absolute", top: 1, left: 0, height: 12, width: `${barW}%`, background: isPos ? "#34d39960" : r.estado === "pen" ? "#f8717160" : "#22d3ee50", borderRadius: 3 }} />
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: r.adjDash >= 0 ? C.emerald : C.rose }}>
+                      {r.adjDash !== 0 ? (r.adjDash > 0 ? "+" : "") + fmtN(r.adjDash) : <span style={{ color: "#334155" }}>—</span>}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.rose }}>
+                      {r.incU > 0 ? "−" + fmtN(r.incU) : <span style={{ color: "#334155" }}>—</span>}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.amber, opacity: includeLost ? 1 : 0.35 }}>
+                      {r.lostU > 0 ? "−" + fmtN(r.lostU) : <span style={{ color: "#334155" }}>—</span>}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: r.hasST ? C.blue : "#334155" }}>
+                      {r.hasST ? fmtN(Math.round(r.stTeorico)) : "—"}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: r.hasST ? C.cyan : "#334155" }}>
+                      {r.hasST ? fmtN(Math.round(r.allowance)) : "—"}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", fontWeight: 700 }}>
+                      {r.estado === "pen"        ? <span style={{ color: C.rose }}>⚠ {fmtN(Math.ceil(r.pen))} u.</span>
+                       : r.estado === "positivo" ? <span style={{ color: C.emerald, fontSize: 8 }}>Favorable</span>
+                       : r.estado === "dentro_tol" ? <span style={{ color: C.cyan, fontSize: 8 }}>Dentro tol.</span>
+                       : <span style={{ color: "#334155", fontSize: 8 }}>Sin ST</span>}
+                    </div>
+                  </div>
+                );
+              })}
+              {/* Total row */}
+              {(() => {
+                const sumPen = rows.reduce((s, r) => s + r.pen, 0);
+                return (
+                  <div style={{ display: "grid", gridTemplateColumns: "50px 1fr 90px 90px 90px 80px 90px 90px", gap: 6, alignItems: "center", padding: "8px 0 2px 0", borderTop: "2px solid #1e293b", marginTop: 2 }}>
+                    <div style={{ fontSize: 9, color: "#e2e8f0", fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>TOTAL</div>
+                    <div />
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: totAdjDash >= 0 ? C.emerald : C.rose, fontWeight: 700 }}>
+                      {(totAdjDash > 0 ? "+" : "") + fmtN(totAdjDash)}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.rose, fontWeight: 700 }}>
+                      {"−" + fmtN(rows.reduce((s, r) => s + r.incU, 0))}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.amber, fontWeight: 700, opacity: includeLost ? 1 : 0.35 }}>
+                      {"−" + fmtN(rows.reduce((s, r) => s + r.lostU, 0))}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.blue, fontWeight: 700 }}>
+                      {fmtN(Math.round(getTotST))}
+                    </div>
+                    <div style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", textAlign: "right", color: C.cyan, fontWeight: 700 }}>
+                      {fmtN(Math.round(totAllowance))}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
+                      {sumPen > 0
+                        ? <><span style={{ fontSize: 11, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: C.rose }}>⚠ {fmtN(Math.ceil(sumPen))} u.</span>
+                            <span style={{ fontSize: 7, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>Σ por Cía</span></>
+                        : <span style={{ fontSize: 9, fontFamily: "'DM Mono',monospace", fontWeight: 700, color: C.emerald }}>Sin excedente</span>
+                      }
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Nota metodológica */}
+          <div style={{ background: "#1e293b20", border: "1px solid #1e293b", borderRadius: 9, padding: "10px 14px", fontSize: 9, fontFamily: "'DM Mono',monospace", color: "#475569", lineHeight: 1.6 }}>
+            <span style={{ color: "#64748b", fontWeight: 600 }}>Metodología: </span>
+            Ajuste Proyectado = Ajuste acumulado (registros) − (INC00101 + Lost) del snapshot, en unidades por Cía.
+            Allowance = 0,125% × Stock Teórico acumulado. Si Ajuste Proyectado ≥ 0 → sin penalidad.
+            Si negativo y |Ajuste Proyectado| &gt; Allowance → Excedente = diferencia en unidades.
+            {totSTDash === 0 && <span style={{ color: C.amber }}> ⚠ Sin Stock Teórico cargado. Ir a Datos → Southbay → 🗑 Limpiar → 📥 Importar el archivo de ajustes.</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════
+function App() {
+  const [clients, setClients] = useState([]);
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("dashboard");
+  const [selCl, setSelCl] = useState(null);
+  const [selYr, setSelYr] = useState(2026);
+  const [showCM, setShowCM] = useState(false);
+  const [showRM, setShowRM] = useState(false);
+  const [showIM, setShowIM] = useState(false);
+  const [showSnapM, setShowSnapM] = useState(false);
+  const [editCl, setEditCl] = useState(null);
+  const [editRec, setEditRec] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [impPrev, setImpPrev] = useState(null);
+  const [impStat, setImpStat] = useState("");
+  const [impMode, setImpMode] = useState("skip"); // "skip" | "replace"
+  const fileRef = useRef(null);
+  const snapFileRef = useRef(null);
+  const [snapPrev, setSnapPrev] = useState(null);
+  const [snapStat, setSnapStat] = useState("");
+  const [snapshot, setSnapshot] = useState(STOCK_SNAPSHOT_DEFAULT);
+  const [sbSnapshot, setSbSnapshot] = useState(SB_SNAPSHOT_DEFAULT);
+  const [showSbSnapM, setShowSbSnapM] = useState(false);
+  const sbSnapFileRef = useRef(null);
+  const [sbSnapPrev, setSbSnapPrev] = useState(null);
+  const [sbSnapStat, setSbSnapStat] = useState("");
+
+  // Client form
+  const [cn, setCn] = useState(""); const [cm, setCm] = useState("in_out"); const [cCats, setCCats] = useState(""); const [cUseCat, setCUseCat] = useState(false);
+  const [cTD, setCTD] = useState(""); const [cTS, setCTS] = useState(""); const [cTO, setCTO] = useState(""); const [cPT, setCPT] = useState("none");
+  const [cCP, setCCP] = useState(false); const [cPSM, setCPSM] = useState("10"); const [cPSY, setCPSY] = useState("prev");
+
+  // Record form
+  const [rCl, setRCl] = useState(""); const [rYr, setRYr] = useState(2026); const [rMo, setRMo] = useState(0); const [rMt, setRMt] = useState(""); const [rCat, setRCat] = useState("_total");
+  const [rSt, setRSt] = useState(""); const [rIn, setRIn] = useState(""); const [rOut, setROut] = useState(""); const [rAdj, setRAdj] = useState("");
+  const [rCM, setRCM] = useState(""); const [rCF, setRCF] = useState(""); const [rST, setRST] = useState("");
+
+  useEffect(() => { (async () => { const c = await ld("dv-clients", []); const r = await ld("dv-records", []); const sn = await ld("dv-snapshot", null); const sbsn = await ld("dv-sb-snapshot", null); setClients(c); setRecords(r); if (sn) setSnapshot(sn); if (sbsn) setSbSnapshot(sbsn); if (c.length) setSelCl(c[0].id); setLoading(false); })(); }, []);
+  const sC = useCallback(async c => { setClients(c); await sv("dv-clients", c); }, []);
+  const sR = useCallback(async r => { setRecords(r); await sv("dv-records", r); }, []);
+
+  // ─── Period helper ───
+  function periodMonths(cl, yr) {
+    if (!cl?.customPeriod) return MONTHS.map((_, i) => ({ year: yr, month: i }));
+    const sm = cl.periodStartMonth ?? 0, sy = cl.periodStartYearOffset === "prev" ? yr - 1 : yr;
+    return Array.from({ length: 12 }, (_, i) => ({ year: sy + Math.floor((sm + i) / 12), month: (sm + i) % 12 }));
+  }
+  function periodRecs(clId, yr, allR) {
+    const cl = clients.find(c => c.id === clId); const pm = periodMonths(cl, yr);
+    return allR.filter(r => r.clientId === clId && pm.some(p => p.year === r.year && p.month === r.month));
+  }
+  function periodLabel(cl, yr) {
+    if (!cl?.customPeriod) return `${yr}`;
+    const ms = periodMonths(cl, yr); const f = ms[0], l = ms[11];
+    return `${MONTHS[f.month]} ${f.year} – ${MONTHS[l.month]} ${l.year}`;
+  }
+  function periodLabels(cl, yr) {
+    return periodMonths(cl, yr).map(p => p.year !== yr ? `${String(p.year).slice(2)}${MONTHS[p.month]}` : MONTHS[p.month]);
+  }
+
+  // ─── Import ───
+  function processRows(raw) {
+    if (!raw.length) { setImpStat("Archivo vacío."); return; }
+    const ks = Object.keys(raw[0]);
+    const kl = ks.map(k => k.toLowerCase().trim());
+    const fi = pat => { const i = kl.findIndex(k => pat(k)); return i >= 0 ? ks[i] : undefined; };
+    const fC   = fi(k => k.includes("cliente"));
+    const fM   = fi(k => k === "mes" || k === "fecha" || k === "month" || k === "date");
+    const fCat = fi(k => k.includes("categ") || k.includes("familia") || k === "cia" || k === "c\xeda");
+    const fAU  = fi(k => k === "ajuste" || k === "ajustes" || (k.includes("ajuste") && k.includes("un")));
+    const fA$  = fi(k => k.includes("ajuste") && k.includes("$"));
+    const fOU  = fi(k => k.includes("out") && k.includes("un"));
+    const fO$  = fi(k => k.includes("out") && k.includes("$"));
+    const fST  = fi(k => k === "teorico" || k === "te\xf3rico" || k.includes("stock teo") || k.includes("cyc") || k.includes("colch"));
+    const MESES_ES = { ene:0,enero:0,feb:1,febrero:1,mar:2,marzo:2,abr:3,abril:3,may:4,mayo:4,jun:5,junio:5,jul:6,julio:6,ago:7,agosto:7,sep:8,sept:8,septiembre:8,oct:9,octubre:9,nov:10,noviembre:10,dic:11,diciembre:11 };
+    const CUR_YEAR = new Date().getFullYear();
+    function pd(v) {
+      if (v instanceof Date && !isNaN(v)) return { month: v.getMonth(), year: v.getFullYear() };
+      if (typeof v === "number") { const d = new Date((v - 25569) * 864e5); return { month: d.getMonth(), year: d.getFullYear() }; }
+      if (typeof v === "string") {
+        const key = v.trim().toLowerCase();
+        // Mes en texto: ene, feb, etc.
+        if (MESES_ES[key] !== undefined) return { month: MESES_ES[key], year: CUR_YEAR };
+        // Fecha parseable
+        const d = new Date(v); if (!isNaN(d)) return { month: d.getMonth(), year: d.getFullYear() };
+        // Texto con año: "2026 - Primer semestre", "2026 Q1", "Acumulado 2026", etc.
+        const yearMatch = v.match(/\b(20\d{2})\b/);
+        if (yearMatch) return { month: 0, year: Number(yearMatch[1]), isPeriod: true };
+      }
+      return { month: null, year: null };
+    }
+    const parsed = raw.map(row => { const { month, year, isPeriod } = pd(fM ? row[fM] : null); return { client: fC ? String(row[fC] || "").trim() : "", month, year, isPeriod: isPeriod || false, category: fCat ? String(row[fCat] || "").trim() : "_total", ajuste: Number(fAU ? row[fAU] : 0) || 0, costoAjuste: Number(fA$ ? row[fA$] : 0) || 0, unidadesOut: abs(Number(fOU ? row[fOU] : 0) || 0), costoFlowOut: abs(Number(fO$ ? row[fO$] : 0) || 0), stockTeorico: abs(Number(fST ? row[fST] : 0) || 0) }; }).filter(r => r.client && r.month != null && r.year != null);
+    const cns = [...new Set(parsed.map(r => r.client))], cCatsMap = {}, cPeriodMap = {};
+    cns.forEach(n => {
+      cCatsMap[n] = [...new Set(parsed.filter(r => r.client === n).map(r => r.category))].filter(c => c && c !== "_total");
+      // Detect cross-year: if data spans >1 year, suggest custom period
+      const years = [...new Set(parsed.filter(r => r.client === n).map(r => r.year))].sort();
+      if (years.length > 1) {
+        const allMonths = parsed.filter(r => r.client === n).map(r => r.year * 12 + r.month).sort((a, b) => a - b);
+        const earliest = allMonths[0];
+        const startMonth = earliest % 12;
+        const startYear = Math.floor(earliest / 12);
+        const latestYear = years[years.length - 1];
+        cPeriodMap[n] = { detected: true, startMonth, yearOffset: startYear < latestYear ? "prev" : "same", closeYear: latestYear };
+      } else {
+        cPeriodMap[n] = { detected: false };
+      }
+    });
+    setImpPrev({ rows: parsed, clientNames: cns, clientCategories: cCatsMap, clientPeriods: cPeriodMap, hasValued: parsed.some(r => r.costoAjuste || r.costoFlowOut), totalRows: parsed.length, months: [...new Set(parsed.map(r => `${MONTHS[r.month]} ${r.year}`))] }); setImpStat("");
+  }
+  function handleFile(e) {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (/csv|tsv/i.test(f.name.split(".").pop())) { Papa.parse(f, { header: true, skipEmptyLines: true, dynamicTyping: true, complete: r => { try { processRows(r.data); } catch (er) { setImpStat("Error: " + er.message); } }, error: er => { setImpStat("Error CSV: " + er.message); } }); }
+    else { const rd = new FileReader(); rd.onload = async ev => { try { if (!window.XLSX) { setImpStat("Cargando librería..."); await new Promise((res, rej) => { const s = document.createElement("script"); s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"; s.onload = res; s.onerror = () => rej(new Error("No se pudo cargar XLSX")); document.head.appendChild(s); }); } const wb = window.XLSX.read(ev.target.result, { type: "array", cellDates: true }); processRows(window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null })); } catch (er) { setImpStat("Error Excel: " + er.message); } }; rd.readAsArrayBuffer(f); }
+  }
+  function execImport() {
+    if (!impPrev) return;
+    let nC = [...clients], nR = [...records]; const idMap = {};
+    impPrev.clientNames.forEach(name => {
+      let ex = nC.find(c => c.name.toLowerCase() === name.toLowerCase());
+      const pd = impPrev.clientPeriods?.[name] || {};
+      if (!ex) { ex = { id: Date.now().toString() + Math.random().toString(36).slice(2, 6), name, method: "out_only", penaltyType: impPrev.hasValued ? "valued" : "none", tolDesvio: 0.10, tolStock: null, tolOut: null, useCategories: (impPrev.clientCategories[name] || []).length > 0, categories: impPrev.clientCategories[name] || [], customPeriod: pd.detected || false, periodStartMonth: pd.detected ? pd.startMonth : 0, periodStartYearOffset: pd.detected ? pd.yearOffset : "prev" }; nC.push(ex); }
+      else {
+        const all = [...new Set([...(ex.categories || []), ...(impPrev.clientCategories[name] || [])])]; if (all.length > (ex.categories || []).length) { ex.categories = all; ex.useCategories = true; }
+        // Update period if detected and client doesn't have one yet
+        if (pd.detected && !ex.customPeriod) { ex.customPeriod = true; ex.periodStartMonth = pd.startMonth; ex.periodStartYearOffset = pd.yearOffset; }
+        nC = nC.map(c => c.id === ex.id ? ex : c);
+      }
+      idMap[name] = ex.id;
+    });
+    let added = 0, skip = 0, replaced = 0;
+    impPrev.rows.forEach(row => {
+      const cid = idMap[row.client];
+      const newRec = { id: Date.now().toString() + Math.random().toString(36).slice(2, 8), clientId: cid, year: row.year, month: row.month, isPeriod: row.isPeriod || false, method: "out_only", category: row.category || "_total", stockActual: 0, stockTeorico: row.stockTeorico || 0, unidadesIn: 0, unidadesOut: row.unidadesOut, ajuste: row.ajuste, costoAjuste: row.costoAjuste, costoFlowOut: row.costoFlowOut };
+      const existIdx = nR.findIndex(r => r.clientId === cid && r.year === row.year && r.month === row.month && (r.category || "_total") === (row.category || "_total"));
+      if (existIdx >= 0) {
+        if (impMode === "replace") { nR[existIdx] = { ...nR[existIdx], ...newRec, id: nR[existIdx].id }; replaced++; }
+        else { skip++; }
+      } else {
+        nR.push(newRec); added++;
+      }
+    });
+    sC(nC); sR(nR); if (nC.length && !selCl) setSelCl(nC[0].id);
+    // Auto-switch to the close year if custom period detected
+    const firstPd = Object.values(impPrev.clientPeriods || {}).find(p => p.detected);
+    if (firstPd?.closeYear) setSelYr(firstPd.closeYear);
+    setImpStat(`✓ ${added} nuevos + ${replaced} reemplazados${skip ? `, ${skip} omitidos` : ""}. ${impPrev.clientNames.length} cliente(s).`);
+    setImpPrev(null); if (fileRef.current) fileRef.current.value = "";
+  }
+
+  // ─── Snapshot Import ───
+  function processSnapRows(raw, filename) {
+    if (!raw.length) { setSnapStat("Archivo vacío."); return; }
+    const ks = Object.keys(raw[0]);
+    const skl = ks.map(k => (k||'').toLowerCase().trim());
+    const sfi = pat => { const i = skl.findIndex(pat); return i >= 0 ? ks[i] : undefined; };
+    const fTipo = sfi(k => k === 'tipo');
+    const fCat  = sfi(k => k.includes('categ') || k === 'cia' || k === 'c\xeda');
+    const fCant = sfi(k => k.includes('cantidad') && !k.includes('asign') && !k.includes('disp'));
+    const fVal  = sfi(k => k === 'total');
+    const fValU = sfi(k => k === 'valor');
+    if (!fTipo || !fCat) { setSnapStat("No se encontraron columnas Tipo y/o Categoria. Revisa el archivo."); return; }
+
+    const TIPOS_VALIDOS = ["Lost", "Reubica", "Rotura"];
+    const byCat = {};
+    raw.forEach(row => {
+      const tipo = String(row[fTipo] || "").trim();
+      const cat  = String(row[fCat]  || "").trim();
+      const cant = Math.abs(Number(row[fCant] || 0)) || 0;
+      const val  = Math.abs(Number(row[fVal]  || row[fValU] || 0)) || 0;
+      if (!cat || cat === "Sin categoría") return;
+      if (!byCat[cat]) byCat[cat] = { stock: 0, lost: 0, reubica: 0, rotura: 0, lostVal: 0, reubicaVal: 0, roturaVal: 0 };
+      byCat[cat].stock += cant; // stock total = suma de todas las filas de esa cat
+      if (tipo === "Lost")    { byCat[cat].lost    += cant; byCat[cat].lostVal    += val; }
+      if (tipo === "Reubica") { byCat[cat].reubica += cant; byCat[cat].reubicaVal += val; }
+      if (tipo === "Rotura")  { byCat[cat].rotura  += cant; byCat[cat].roturaVal  += val; }
+    });
+
+    // Recalcular stock total real (suma de TODOS los tipos por categoría, sin filtrar)
+    const stockByCat = {};
+    raw.forEach(row => {
+      const cat  = String(row[fCat] || "").trim();
+      const cant = Math.abs(Number(row[fCant] || 0)) || 0;
+      if (!cat || cat === "Sin categoría") return;
+      stockByCat[cat] = (stockByCat[cat] || 0) + cant;
+    });
+
+    const categories = Object.entries(byCat).map(([name, d]) => ({
+      name,
+      stock: stockByCat[name] || d.stock,
+      lost: d.lost, reubica: d.reubica, rotura: d.rotura,
+      lostVal: d.lostVal, reubicaVal: d.reubicaVal, roturaVal: d.roturaVal,
+    }));
+
+    // Detectar fecha del archivo
+    const now = new Date();
+    const meses = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+    const date = `${meses[now.getMonth()]} ${now.getFullYear()}`;
+
+    setSnapPrev({ categories, date, totalRows: raw.length, catCount: categories.length, filename });
+    setSnapStat("");
+  }
+
+  function handleSnapFile(e) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setSnapPrev(null); setSnapStat("Procesando...");
+    const rd = new FileReader();
+    rd.onload = async ev => {
+      try {
+        if (!window.XLSX) {
+          await new Promise((res, rej) => {
+            const s = document.createElement("script");
+            s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+            s.onload = res; s.onerror = () => rej(new Error("No se pudo cargar XLSX"));
+            document.head.appendChild(s);
+          });
+        }
+        const wb = window.XLSX.read(ev.target.result, { type: "array", cellDates: true });
+        const rows = window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null });
+        processSnapRows(rows, f.name);
+      } catch (er) { setSnapStat("Error: " + er.message); }
+    };
+    rd.readAsArrayBuffer(f);
+  }
+
+  async function execSnapImport() {
+    if (!snapPrev) return;
+    const newSnap = { client: "Pedidos Ya", date: snapPrev.date, lostThreshold: snapshot.lostThreshold, categories: snapPrev.categories };
+    setSnapshot(newSnap);
+    await sv("dv-snapshot", newSnap);
+    setSnapStat(`✓ Snapshot actualizado · ${snapPrev.catCount} categorías · ${snapPrev.date}`);
+    setSnapPrev(null);
+    if (snapFileRef.current) snapFileRef.current.value = "";
+  }
+
+  // ─── Southbay Snapshot Import ───
+  function processSbSnapRows(raw, filename) {
+    if (!raw.length) { setSbSnapStat("Archivo vacío."); return; }
+    const ks = Object.keys(raw[0]);
+    // Southbay stock file columns: Ubicación, Cía, Cantidad
+    const sbkl = ks.map(k => (k||'').toLowerCase().trim());
+    const sbfi = pat => { const i = sbkl.findIndex(pat); return i >= 0 ? ks[i] : undefined; };
+    const fUbic = sbfi(k => k.includes('ubic'));
+    const fCia  = sbfi(k => k === 'cia' || k === 'c\xeda');
+    const fCant = sbfi(k => k.includes('cantidad') && !k.includes('asign') && !k.includes('disp'));
+    if (!fCia || !fCant) { setSbSnapStat("No se encontraron columnas Cia y/o Cantidad. Revisa el archivo."); return; }
+    const byCia = {};
+    raw.forEach(row => {
+      const ubic = String(row[fUbic] || "").trim().toUpperCase();
+      const cia  = String(row[fCia]  || "").trim();
+      const cant = Math.abs(Number(row[fCant] || 0)) || 0;
+      if (!cia || cia === "") return;
+      if (!byCia[cia]) byCia[cia] = { stock: 0, inc: 0, lost: 0 };
+      byCia[cia].stock += cant;
+      if (ubic === "INC00101") byCia[cia].inc  += cant;
+      if (ubic === "LOST")     byCia[cia].lost += cant;
+    });
+    const categories = Object.entries(byCia)
+      .filter(([name]) => name !== "")
+      .map(([name, d]) => ({ name, stock: d.stock, inc: d.inc, lost: d.lost, incVal: 0, lostVal: 0 }));
+    const now = new Date(); const meses = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+    setSbSnapPrev({ categories, date: `${meses[now.getMonth()]} ${now.getFullYear()}`, totalRows: raw.length, catCount: categories.length, filename });
+    setSbSnapStat("");
+  }
+
+  function handleSbSnapFile(e) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setSbSnapPrev(null); setSbSnapStat("Procesando...");
+    const rd = new FileReader();
+    rd.onload = async ev => {
+      try {
+        if (!window.XLSX) { await new Promise((res, rej) => { const s = document.createElement("script"); s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"; s.onload = res; s.onerror = () => rej(new Error("No se pudo cargar XLSX")); document.head.appendChild(s); }); }
+        const wb = window.XLSX.read(ev.target.result, { type: "array", cellDates: true });
+        processSbSnapRows(window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null }), f.name);
+      } catch (er) { setSbSnapStat("Error: " + er.message); }
+    };
+    rd.readAsArrayBuffer(f);
+  }
+
+  async function execSbSnapImport() {
+    if (!sbSnapPrev) return;
+    const newSnap = { client: "Southbay", date: sbSnapPrev.date, lostThreshold: sbSnapshot.lostThreshold, categories: sbSnapPrev.categories };
+    setSbSnapshot(newSnap);
+    await sv("dv-sb-snapshot", newSnap);
+    setSbSnapStat(`✓ Snapshot Southbay actualizado · ${sbSnapPrev.catCount} categorías · ${sbSnapPrev.date}`);
+    setSbSnapPrev(null);
+    if (sbSnapFileRef.current) sbSnapFileRef.current.value = "";
+  }
+
+  // ─── Client CRUD ───
+  function openNC() { setEditCl(null); setCn(""); setCm("in_out"); setCCats(""); setCUseCat(false); setCTD(""); setCTS(""); setCTO(""); setCPT("none"); setCCP(false); setCPSM("10"); setCPSY("prev"); setShowCM(true); }
+  function openEC(c) { setEditCl(c.id); setCn(c.name); setCm(c.method); setCCats((c.categories || []).join(", ")); setCUseCat(c.useCategories || false); setCTD(c.tolDesvio?.toString() || ""); setCTS(c.tolStock?.toString() || ""); setCTO(c.tolOut?.toString() || ""); setCPT(c.penaltyType || "none"); setCCP(c.customPeriod || false); setCPSM(c.periodStartMonth?.toString() || "10"); setCPSY(c.periodStartYearOffset || "prev"); setShowCM(true); }
+  function saveCl() {
+    if (!cn.trim()) return;
+    const cats = cUseCat ? cCats.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const b = { name: cn.trim(), method: cm, categories: cats, useCategories: cUseCat, tolDesvio: Number(cTD) || null, tolStock: Number(cTS) || null, tolOut: Number(cTO) || null, penaltyType: cPT, customPeriod: cCP, periodStartMonth: Number(cPSM), periodStartYearOffset: cPSY };
+    if (editCl) sC(clients.map(c => c.id === editCl ? { ...c, ...b } : c));
+    else { const nc = { id: Date.now().toString(), ...b }; sC([...clients, nc]); setSelCl(nc.id); }
+    setShowCM(false);
+  }
+  function delCl(id) { sC(clients.filter(c => c.id !== id)); sR(records.filter(r => r.clientId !== id)); if (selCl === id) setSelCl(clients.find(c => c.id !== id)?.id || null); setConfirmDel(null); }
+
+  // ─── Record CRUD ───
+  function openNR(cid) { setEditRec(null); const cl = clients.find(c => c.id === cid); setRCl(cid); setRYr(selYr); setRMo(new Date().getMonth()); setRMt(cl?.method || "in_out"); setRCat("_total"); setRSt(""); setRST(""); setRIn(""); setROut(""); setRAdj(""); setRCM(""); setRCF(""); setShowRM(true); }
+  function openER(r) { setEditRec(r.id); setRCl(r.clientId); setRYr(r.year); setRMo(r.month); setRMt(r.method); setRCat(r.category || "_total"); setRSt(r.stockActual?.toString() || ""); setRST(r.stockTeorico?.toString() || ""); setRIn(r.unidadesIn?.toString() || ""); setROut(r.unidadesOut?.toString() || ""); setRAdj(r.ajuste?.toString() || ""); setRCM(r.costoAjuste?.toString() || ""); setRCF(r.costoFlowOut?.toString() || ""); setShowRM(true); }
+  function saveRec() {
+    const d = { clientId: rCl, year: Number(rYr), month: Number(rMo), method: rMt, category: rCat, stockActual: Number(rSt) || 0, stockTeorico: Number(rST) || 0, unidadesIn: Number(rIn) || 0, unidadesOut: Number(rOut) || 0, ajuste: Number(rAdj) || 0, costoAjuste: Number(rCM) || 0, costoFlowOut: Number(rCF) || 0 };
+    if (editRec) sR(records.map(r => r.id === editRec ? { ...r, ...d } : r));
+    else sR([...records, { id: Date.now().toString(), ...d }]);
+    setShowRM(false);
+  }
+  function delRec(id) { sR(records.filter(r => r.id !== id)); setConfirmDel(null); }
+
+  // ─── Calcs ───
+  function cDesvio(r) { // units-based desvío % (uses absolute values for ratio)
+    if (!r.ajuste) return 0; const a = abs(r.ajuste); let b = r.method === "in_out" ? r.unidadesIn + r.unidadesOut : r.method === "in_out_avg" ? (r.unidadesIn + r.unidadesOut) / 2 : r.unidadesOut;
+    return b > 0 ? (a / b) * 100 : 0;
+  }
+  function cDesvioVal(r) { return r.costoFlowOut > 0 ? (abs(r.costoAjuste) / abs(r.costoFlowOut)) * 100 : 0; }
+  function cAllowance(tolPct, costoFlowOut) { return tolPct > 0 ? (tolPct / 100) * abs(costoFlowOut) : 0; }
+  // NC: only when adjustment is negative (faltante) and exceeds allowance
+  function cNC(ajuste$, allowance) {
+    if (ajuste$ >= 0) return 0; // positive = favorable, no penalty
+    const excedente = (-ajuste$) - allowance; // -ajuste$ = abs of negative value
+    return excedente > 0 ? excedente : 0;
+  }
+  function cPenUnits(desvio, tol, ajuste, out, method, inp) {
+    if (ajuste >= 0) return 0; // positive = favorable
+    if (!tol || desvio <= tol) return 0;
+    if (!tol || desvio <= tol) return 0;
+    let b = method === "in_out" ? inp + out : method === "in_out_avg" ? (inp + out) / 2 : out;
+    return Math.max(0, abs(ajuste) - (tol / 100) * b);
+  }
+
+  function cDesvioSB(r) { // Southbay: |ajuste| / stockTeorico × 100
+    if (!r.ajuste) return 0;
+    const base = r.stockTeorico || r.stockActual || 0;
+    return base > 0 ? (abs(r.ajuste) / base) * 100 : 0;
+  }
+
+  // ─── Derived ───
+  const clObj = clients.find(c => c.id === selCl);
+  const clRecs = periodRecs(selCl, selYr, records);
+  const categories = clObj?.useCategories ? (clObj.categories || []) : [];
+  const isV = clObj?.penaltyType === "valued", isU = clObj?.penaltyType === "units", hasP = isV || isU;
+  const tD = clObj?.tolDesvio || null, tS = clObj?.tolStock || null, tO = clObj?.tolOut || null;
+  const pMths = periodMonths(clObj, selYr), pLbls = periodLabels(clObj, selYr);
+
+  // Aggregate by period month (sum categories if no _total)
+  function aggByMonth(recs) {
+    const byKey = {};
+    recs.forEach(r => {
+      const k = `${r.year}-${r.month}`;
+      if (!byKey[k]) byKey[k] = { year: r.year, month: r.month, stockActual: 0, stockTeorico: 0, unidadesIn: 0, unidadesOut: 0, ajuste: 0, costoAjuste: 0, costoFlowOut: 0, method: clObj?.method || "out_only" };
+      const t = byKey[k]; t.stockActual += r.stockActual || 0; t.stockTeorico += r.stockTeorico || 0; t.unidadesIn += r.unidadesIn || 0; t.unidadesOut += r.unidadesOut || 0; t.ajuste += r.ajuste || 0; t.costoAjuste += r.costoAjuste || 0; t.costoFlowOut += r.costoFlowOut || 0;
+    });
+    return Object.values(byKey);
+  }
+  const totRecs = clRecs.filter(r => r.category === "_total");
+  const effTot = totRecs.length > 0 ? totRecs : aggByMonth(clRecs);
+
+  const isSB = clObj?.method === "stock_teorico"; const getD = r => isV ? cDesvioVal(r) : isSB ? cDesvioSB(r) : cDesvio(r);
+  const mDesvio = pMths.map((p, i) => { const r = effTot.find(x => x.year === p.year && x.month === p.month); return { label: pLbls[i], value: r ? getD(r) : 0 }; });
+
+  // Acumulados
+  const aAdj = effTot.reduce((s, r) => s + (r.ajuste || 0), 0);
+  const aIn = effTot.reduce((s, r) => s + (r.unidadesIn || 0), 0);
+  const aOut = effTot.reduce((s, r) => s + (r.unidadesOut || 0), 0);
+  const aCAdj = effTot.reduce((s, r) => s + (r.costoAjuste || 0), 0);
+  const aCF = effTot.reduce((s, r) => s + (r.costoFlowOut || 0), 0);
+  const aMethod = clObj?.method || "out_only";
+  const aST = effTot.reduce((s, r) => s + (r.stockTeorico || 0), 0);
+  let aBase = aMethod === "in_out" ? aIn + aOut : aMethod === "in_out_avg" ? (aIn + aOut) / 2 : aMethod === "stock_teorico" ? aST : aOut;
+  const aDesvioU = aBase > 0 ? (abs(aAdj) / aBase) * 100 : 0;
+  const aDesvioV = aCF > 0 ? (abs(aCAdj) / abs(aCF)) * 100 : 0;
+  const mainD = isV ? aDesvioV : aDesvioU;
+  const aAllowance = isV && tD ? cAllowance(tD, aCF) : 0;
+  const aNC = isV ? cNC(aCAdj, aAllowance) : 0;
+  const aPenU = isU && tD ? cPenUnits(aDesvioU, tD, aAdj, aOut, aMethod, aIn) : 0;
+
+  // Cat breakdown
+  const catData = categories.map(cat => {
+    const cr = clRecs.filter(r => r.category === cat);
+    const a = cr.reduce((s, r) => s + (r.ajuste || 0), 0), o = cr.reduce((s, r) => s + (r.unidadesOut || 0), 0), i = cr.reduce((s, r) => s + (r.unidadesIn || 0), 0);
+    const ca = cr.reduce((s, r) => s + (r.costoAjuste || 0), 0), cf = cr.reduce((s, r) => s + (r.costoFlowOut || 0), 0);
+    const st = cr.reduce((s, r) => s + (r.stockTeorico || 0), 0);
+    let b = aMethod === "in_out" ? i + o : aMethod === "in_out_avg" ? (i + o) / 2 : aMethod === "stock_teorico" ? st : o;
+    const dvU = b > 0 ? (abs(a) / b) * 100 : 0, dvV = cf > 0 ? (abs(ca) / abs(cf)) * 100 : 0;
+    const dv = isV ? dvV : dvU;
+    const allow = isV && tD ? cAllowance(tD, cf) : 0;
+    const nc = isV ? cNC(ca, allow) : 0;
+    const pu = isU && tD ? cPenUnits(dvU, tD, a, o, aMethod, i) : 0;
+    return { name: cat, ajuste: a, costoAjuste: ca, costoFlowOut: cf, desvio: dv, allowance: allow, nc, penU: pu, mDesvio: pMths.map(p => { const rc = cr.find(r => r.year === p.year && r.month === p.month); return rc ? (isV ? cDesvioVal(rc) : cDesvio(rc)) : null; }) };
+  });
+
+  // All clients summary
+  const allSummary = clients.map(cl => {
+    const cr = periodRecs(cl.id, selYr, records);
+    const eff = cr.filter(r => r.category === "_total").length > 0 ? cr.filter(r => r.category === "_total") : aggByMonth(cr);
+    const a = eff.reduce((s, r) => s + (r.ajuste || 0), 0), o = eff.reduce((s, r) => s + (r.unidadesOut || 0), 0), inp = eff.reduce((s, r) => s + (r.unidadesIn || 0), 0);
+    const ca = eff.reduce((s, r) => s + (r.costoAjuste || 0), 0), cf = eff.reduce((s, r) => s + (r.costoFlowOut || 0), 0);
+    let b = cl.method === "in_out" ? inp + o : cl.method === "in_out_avg" ? (inp + o) / 2 : o;
+    const iv = cl.penaltyType === "valued", iu = cl.penaltyType === "units";
+    const dvU = b > 0 ? (abs(a) / b) * 100 : 0, dvV = cf > 0 ? (abs(ca) / abs(cf)) * 100 : 0;
+    const dv = iv ? dvV : dvU;
+    const allow = iv && cl.tolDesvio ? cAllowance(cl.tolDesvio, cf) : 0;
+    const nc = iv ? cNC(ca, allow) : 0;
+    const pu = iu && cl.tolDesvio ? cPenUnits(dvU, cl.tolDesvio, a, o, cl.method, inp) : 0;
+    const pm = periodMonths(cl, selYr);
+    return { ...cl, ajuste: a, costoAjuste: ca, desvio: dv, meses: eff.length, nc, penU: pu, allowance: allow, periodLbl: periodLabel(cl, selYr),
+      spark: pm.map(p => { const rc = eff.find(r => r.year === p.year && r.month === p.month); return rc ? (iv ? cDesvioVal(rc) : cl.method === "stock_teorico" ? cDesvioSB(rc) : ((() => { let bb = cl.method === "in_out" ? rc.unidadesIn + rc.unidadesOut : cl.method === "in_out_avg" ? (rc.unidadesIn + rc.unidadesOut) / 2 : rc.unidadesOut; return bb > 0 ? (abs(rc.ajuste) / bb) * 100 : 0; })())) : null; }),
+      alertD: iv ? nc > 0 : (iu ? (pu > 0) : (cl.tolDesvio > 0 && dv > cl.tolDesvio)) };
+  });
+
+  const C = { purple: "#a855f7", blue: "#60a5fa", amber: "#fbbf24", rose: "#fb7185", emerald: "#34d399", cyan: "#22d3ee" };
+  const CC = ["#a855f7", "#60a5fa", "#fbbf24", "#fb7185", "#34d399", "#22d3ee", "#f97316", "#818cf8"];
+
+  if (loading) return <div style={{ minHeight: "100vh", background: "#020617", display: "flex", alignItems: "center", justifyContent: "center", color: "#a855f7", fontFamily: "'DM Mono',monospace" }}>Cargando...</div>;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#020617", color: "#e2e8f0", fontFamily: "'Satoshi','DM Sans',sans-serif" }}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+      {/* Header */}
+      <div style={{ borderBottom: "1px solid #1e293b", padding: "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#a855f7", boxShadow: "0 0 10px #a855f7" }} />
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16 }}>ITL Desvíos</span>
+          <span style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginLeft: 6 }}>Control de Inventario</span>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <Btn small accent onClick={() => { setImpPrev(null); setImpStat(""); setShowIM(true); }}>📥 Importar</Btn>
+          <F small value={selYr} onChange={v => setSelYr(Number(v))} options={YEARS.map(y => ({ value: y, label: y.toString() }))} />
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 3, padding: "10px 24px", borderBottom: "1px solid #0f172a" }}>
+        {[["dashboard","Dashboard"],["clientes","Clientes"],["datos","Cargar Datos"],["info","Info"]].map(([id,lb]) => <Pill key={id} active={tab === id} onClick={() => setTab(id)}>{lb}</Pill>)}
+      </div>
+
+      <div style={{ padding: "18px 24px", maxWidth: 1200 }}>
+
+        {/* ═══ DASHBOARD ═══ */}
+        {tab === "dashboard" && (
+          <div>
+            {clients.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 50, color: "#475569" }}>
+                <p style={{ fontSize: 14, marginBottom: 14 }}>No hay clientes configurados.</p>
+                <div style={{ display: "flex", gap: 8, justifyContent: "center" }}><Btn primary onClick={() => { setTab("clientes"); openNC(); }}>Agregar cliente</Btn><Btn accent onClick={() => { setImpPrev(null); setImpStat(""); setShowIM(true); }}>📥 Importar</Btn></div>
+              </div>
+            ) : (
+              <>
+                <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 14, color: "#94a3b8", marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.08em" }}>Resumen {selYr}</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 10, marginBottom: 28 }}>
+                  {allSummary.map(cs => {
+                    const ha = cs.alertD;
+                    return (
+                      <div key={cs.id} onClick={() => setSelCl(cs.id)} style={{ background: selCl === cs.id ? "#1e293b" : "#0f172a", border: ha ? "1.5px solid #f87171" : selCl === cs.id ? "1.5px solid #7c3aed" : "1px solid #1e293b", borderRadius: 13, padding: "14px 18px", cursor: "pointer", transition: "all .15s", boxShadow: ha ? "0 0 14px rgba(248,113,113,.1)" : "none" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ fontWeight: 600, fontSize: 13, fontFamily: "'Space Grotesk',sans-serif" }}>{cs.name}</span>
+                              {ha && <span style={{ fontSize: 8, padding: "2px 6px", borderRadius: 5, background: "#f8717120", color: "#f87171", fontFamily: "'DM Mono',monospace", fontWeight: 600 }}>EXCEDE TOL.</span>}
+                            </div>
+                            <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginTop: 2 }}>
+                              {cs.meses} meses · {cs.customPeriod ? cs.periodLbl : selYr}
+                              {cs.penaltyType !== "none" && <> · <span style={{ color: cs.penaltyType === "valued" ? C.cyan : C.amber }}>{cs.penaltyType === "valued" ? "Valorizada" : "Unidades"}</span></>}
+                            </div>
+                          </div>
+                          <Spark values={cs.spark} color={ha ? C.rose : C.emerald} />
+                        </div>
+                        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                          <div><div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>MERMA %</div><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 17, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: ha ? C.rose : C.emerald }}>{cs.desvio.toFixed(3)}%</span><Badge value={cs.desvio} threshold={cs.tolDesvio} small nc={cs.nc} isValued={cs.penaltyType === "valued"} ajuste={cs.costoAjuste} /></div></div>
+                          {isV && <div><div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>$AJUSTE</div><span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: cs.costoAjuste >= 0 ? C.emerald : C.rose }}>{fmtMS(cs.costoAjuste)}</span></div>}
+                          {cs.penaltyType === "valued" && cs.nc > 0 && <div><div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>NC EST.</div><span style={{ fontSize: 15, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: C.rose }}>{fmtM(cs.nc)}</span></div>}
+                          {cs.penaltyType === "units" && cs.penU > 0 && <div><div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>EXCEDENTE</div><span style={{ fontSize: 15, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: C.rose }}>{fmt(Math.ceil(cs.penU))} u.</span></div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Client detail */}
+                {clObj && (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                      <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 14, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.08em", margin: 0 }}>
+                        {clObj.name} <span style={{ fontSize: 11, fontWeight: 400, color: "#64748b", textTransform: "none", letterSpacing: "normal" }}>({clObj.customPeriod ? periodLabel(clObj, selYr) : selYr})</span>
+                      </h3>
+                      <Btn small primary onClick={() => openNR(clObj.id)}>+ Cargar</Btn>
+                    </div>
+
+                    {/* Info bar */}
+                    <div style={{ display: "flex", gap: 14, marginBottom: 14, padding: "9px 14px", background: "#1e293b", borderRadius: 9, alignItems: "center", flexWrap: "wrap", fontSize: 10, fontFamily: "'DM Mono',monospace" }}>
+                      {tD && <span style={{ color: "#a855f7" }}>Tol. Merma ≤ {tD}%{isSB ? " (por categoría)" : ""}</span>}
+                      {isSB && <><span style={{ width: 1, height: 12, background: "#334155" }} /><span style={{ color: C.blue }}>Base: Stock Teórico CYC</span></>}
+                      {hasP && <><span style={{ width: 1, height: 12, background: "#334155" }} /><span style={{ color: C.cyan }}>{isV ? "Penalidad: Valorizada (NC)" : "Penalidad: Unidades excedentes"}</span></>}
+                    </div>
+
+                    {/* Stock Snapshot */}
+                    {clObj.name.toLowerCase().includes("pedidos") && (
+                      <StockSnapshot clientName={clObj.name} snap={snapshot} onUpdateSnap={() => { setSnapPrev(null); setSnapStat(""); setShowSnapM(true); }} />
+                    )}
+                    {clObj.name.toLowerCase().includes("southbay") && (
+                      <StockSnapshot clientName={clObj.name} snap={sbSnapshot} onUpdateSnap={() => { setSbSnapPrev(null); setSbSnapStat(""); setShowSbSnapM(true); }} />
+                    )}
+
+                    {/* KPIs */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(155px, 1fr))", gap: 9, marginBottom: 20 }}>
+                      {[
+                        { l: "Merma % Acum.", v: mainD, f: `${mainD.toFixed(3)}%`, c: isV ? (aNC > 0 ? C.rose : C.emerald) : (tD && mainD > tD && aCAdj < 0 ? C.rose : C.emerald), s: isV ? "$Ajuste / $OUT" : CALC_METHODS.find(m => m.id === aMethod)?.label, t: tD, nc: aNC, isValued: isV, ajuste: aCAdj },
+                        ...(isV ? [
+                          { l: "$Ajuste Acum.", v: 0, f: fmtMS(aCAdj), c: aCAdj >= 0 ? C.emerald : C.rose, s: `${effTot.length} meses`, t: null },
+                          { l: "Allowance", v: 0, f: fmtM(aAllowance), c: C.cyan, s: `${tD}% × $OUT`, t: null },
+                          ...(aNC > 0 ? [{ l: "NC Estimada", v: 0, f: fmtM(aNC), c: C.rose, s: `|$Ajuste| - Allowance`, t: null }] : []),
+                        ] : []),
+                        ...(isU && aPenU > 0 ? [{ l: "Uds. Excedentes", v: 0, f: `${fmt(Math.ceil(aPenU))} u.`, c: C.rose, s: `Sobre tol. ${tD}%`, t: null }] : []),
+                        { l: "Ajuste Acum. (u.)", v: 0, f: `${fmt(abs(aAdj))} u.`, c: C.amber, s: `${effTot.length} meses`, t: null },
+                      ].map((k, i) => (
+                        <div key={i} style={{ background: "#0f172a", border: k.nc > 0 ? "1.5px solid #f87171" : k.t && !k.isValued && k.v > k.t && k.ajuste < 0 ? "1.5px solid #f87171" : "1px solid #1e293b", borderRadius: 11, padding: "12px 15px" }}>
+                          <div style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: "0.04em" }}>{k.l}</div>
+                          <div style={{ display: "flex", alignItems: "center", marginTop: 3 }}>
+                            <span style={{ fontSize: 18, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: k.c }}>{k.f}</span>
+                            {k.t && <Badge value={k.v} threshold={k.t} nc={k.nc} isValued={k.isValued} ajuste={k.ajuste} />}
+                          </div>
+                          <div style={{ fontSize: 9, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 2 }}>{k.s}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Chart */}
+                    {(() => {
+                      // Per-month exceeds: only red if that month has negative ajuste exceeding allowance
+                      const mExceeds = pMths.map(p => {
+                        const r = effTot.find(x => x.year === p.year && x.month === p.month);
+                        if (!r) return false;
+                        if (isV) { const al = tD ? cAllowance(tD, r.costoFlowOut) : 0; return cNC(r.costoAjuste, al) > 0; }
+                        if (isU) return cPenUnits(cDesvio(r), tD, r.ajuste, r.unidadesOut, r.method, r.unidadesIn) > 0;
+                        return tD && cDesvio(r) > tD && r.ajuste < 0;
+                      });
+                      return (
+                        <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "14px 12px", marginBottom: 20, overflowX: "auto" }}>
+                          <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 8, textTransform: "uppercase" }}>{isV ? "Merma Valorizada Mensual %" : "Merma Mensual %"}</div>
+                          <MiniBar data={mDesvio} color={C.purple} threshold={tD} maxVal={Math.max(...mDesvio.map(d => d.value), tD || 0, 0.3)} exceeds={mExceeds} />
+                        </div>
+                      );
+                    })()}
+
+                    {/* Categories */}
+                    {categories.length > 0 && catData.length > 0 && (
+                      <div style={{ marginBottom: 20 }}>
+                        <h4 style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 12, color: "#94a3b8", marginBottom: 10, textTransform: "uppercase" }}>Por Categoría</h4>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 9 }}>
+                          {catData.map((cd, i) => (
+                            <div key={cd.name} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "12px 16px" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: CC[i % CC.length] }} />
+                                  <span style={{ fontWeight: 600, fontSize: 12, fontFamily: "'Space Grotesk',sans-serif" }}>{cd.name}</span>
+                                </div>
+                                <Spark values={cd.mDesvio} color={CC[i % CC.length]} width={90} />
+                              </div>
+                              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11 }}>
+                                <div><div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>MERMA %</div><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'Space Grotesk',sans-serif", color: cd.desvio > (tD || 999) ? C.rose : CC[i % CC.length] }}>{cd.desvio.toFixed(4)}%</span><Badge value={cd.desvio} threshold={tD} small nc={cd.nc} isValued={isV} ajuste={cd.costoAjuste} /></div></div>
+                                {isSB && <div><div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>TOL.</div><span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: C.cyan }}>{tD ? tD + "%" : "—"}</span></div>}
+                                {isV && <div><div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>$AJUSTE</div><span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: cd.costoAjuste >= 0 ? C.emerald : C.rose }}>{fmtMS(cd.costoAjuste)}</span></div>}
+                                {isV && <div><div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>ALLOW.</div><span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: C.cyan }}>{fmtM(cd.allowance)}</span></div>}
+                                {isV && cd.nc > 0 && <div><div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>NC EST.</div><span style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: C.rose }}>{fmtM(cd.nc)}</span></div>}
+                                {isU && cd.penU > 0 && <div><div style={{ fontSize: 8, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>EXCED.</div><span style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: C.rose }}>{fmt(Math.ceil(cd.penU))} u.</span></div>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Proyección NC – Pedidos Ya */}
+                    {clObj?.name?.toLowerCase().includes("pedidos") && !isSB && (
+                      <ProyeccionNC
+                        clientName={clObj.name}
+                        catData={catData}
+                        records={records}
+                        clients={clients}
+                        selYr={selYr}
+                        periodRecs={periodRecs}
+                        periodMonths={periodMonths}
+                        isV={isV}
+                        snap={snapshot}
+                      />
+                    )}
+
+                    {/* Proyección Penalidad – Southbay */}
+                    {isSB && (
+                      <ProyeccionSB
+                        clientName={clObj.name}
+                        records={records}
+                        clients={clients}
+                        selYr={selYr}
+                        periodRecs={periodRecs}
+                        sbSnapshot={sbSnapshot}
+                      />
+                    )}
+
+                    {/* Table */}
+                    <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: 14, overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "'DM Mono',monospace" }}>
+                        <thead><tr style={{ borderBottom: "1px solid #1e293b" }}>
+                          {["Mes","Cat.","Ajuste (u.)",isV && "$Ajuste",isV && "$FlowOUT",isSB && "Stock Teórico",!isSB && "OUT (u.)","Merma %",isV && "Allow.",isV && "NC Est.",isU && "Exced.","",""].filter(Boolean).map(h => <th key={h} style={{ padding: "7px 4px", textAlign: "left", color: "#64748b", fontWeight: 500, fontSize: 8, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>
+                          {clRecs.sort((a, b) => (a.year - b.year) || (a.month - b.month) || (a.category || "").localeCompare(b.category || "")).map(r => {
+                            const dv = getD(r);
+                            const rAllow = isV && tD ? cAllowance(tD, r.costoFlowOut) : 0;
+                            const rNC = isV ? cNC(r.costoAjuste, rAllow) : 0;
+                            const rPU = isU ? cPenUnits(cDesvio(r), tD, r.ajuste, r.unidadesOut, r.method, r.unidadesIn) : 0;
+                            const exD = isV ? rNC > 0 : (isU ? rPU > 0 : (tD && dv > tD));
+                            return (
+                              <tr key={r.id} style={{ borderBottom: "1px solid #0f172a", background: exD ? "#f8717108" : "transparent" }}>
+                                <td style={{ padding: "5px 4px" }}>{r.year !== selYr ? `${String(r.year).slice(2)}${MONTHS[r.month]}` : MONTHS[r.month]}</td>
+                                <td style={{ padding: "5px 4px", color: r.category === "_total" ? "#64748b" : "#a855f7", maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.category === "_total" ? "Total" : r.category}</td>
+                                <td style={{ padding: "5px 4px", color: r.ajuste >= 0 ? C.emerald : C.rose }}>{fmt(r.ajuste)}</td>
+                                {isV && <td style={{ padding: "5px 4px", fontSize: 9, color: r.costoAjuste >= 0 ? C.emerald : C.rose }}>{fmtMS(r.costoAjuste)}</td>}
+                                {isV && <td style={{ padding: "5px 4px", fontSize: 9 }}>{fmtM(r.costoFlowOut)}</td>}
+                                {isSB && <td style={{ padding: "5px 4px", color: "#60a5fa" }}>{fmt(r.stockTeorico)}</td>}
+                                {!isSB && <td style={{ padding: "5px 4px" }}>{fmt(r.unidadesOut)}</td>}
+                                <td style={{ padding: "5px 4px", fontWeight: 600, color: exD ? C.rose : r.ajuste >= 0 ? C.emerald : "#e2e8f0" }}>{dv.toFixed(3)}%</td>
+                                {isV && <td style={{ padding: "5px 4px", color: C.cyan, fontSize: 9 }}>{fmtM(rAllow)}</td>}
+                                {isV && <td style={{ padding: "5px 4px", color: rNC > 0 ? C.rose : "#64748b", fontSize: 9 }}>{rNC > 0 ? fmtM(rNC) : "—"}</td>}
+                                {isU && <td style={{ padding: "5px 4px", color: rPU > 0 ? C.rose : "#64748b" }}>{rPU > 0 ? `${fmt(Math.ceil(rPU))} u.` : "—"}</td>}
+                                <td style={{ padding: "5px 4px" }}>{exD ? <span style={{ fontSize: 8, padding: "1px 4px", borderRadius: 4, background: "#f8717120", color: "#f87171", fontWeight: 600 }}>⚠</span> : r.ajuste ? <span style={{ fontSize: 8, padding: "1px 4px", borderRadius: 4, background: "#34d39920", color: "#34d399", fontWeight: 600 }}>✓</span> : null}</td>
+                                <td style={{ padding: "5px 4px", display: "flex", gap: 2 }}>
+                                  <IBtn onClick={() => openER(r)}>✎</IBtn><IBtn onClick={() => setConfirmDel({ t: "r", id: r.id })} danger>✕</IBtn>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {clRecs.length === 0 && <tr><td colSpan={12} style={{ padding: 18, textAlign: "center", color: "#475569" }}>Sin registros</td></tr>}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ═══ CLIENTES ═══ */}
+        {tab === "clientes" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 14, color: "#94a3b8", margin: 0 }}>Clientes</h3>
+              <Btn primary onClick={openNC}>+ Nuevo</Btn>
+            </div>
+            {clients.map(c => (
+              <div key={c.id} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "14px 18px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13, fontFamily: "'Space Grotesk',sans-serif" }}>{c.name}</span>
+                    {c.penaltyType !== "none" && <span style={{ fontSize: 8, padding: "2px 6px", borderRadius: 5, background: c.penaltyType === "valued" ? "#22d3ee18" : "#fbbf2418", color: c.penaltyType === "valued" ? C.cyan : C.amber, fontFamily: "'DM Mono',monospace", fontWeight: 600 }}>{c.penaltyType === "valued" ? "VALORIZADA" : "UNIDADES"}</span>}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginTop: 3 }}>
+                    {CALC_METHODS.find(m => m.id === c.method)?.label}
+                    {c.useCategories && c.categories?.length > 0 && ` · ${c.categories.length} cat.`}
+                    {c.tolDesvio > 0 && ` · Tol: ${c.tolDesvio}%`}
+                    {c.customPeriod && ` · Período: ${MONTHS[c.periodStartMonth]} (${c.periodStartYearOffset === "prev" ? "año ant." : "mismo año"})`}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 5 }}><Btn small onClick={() => openEC(c)}>Editar</Btn><Btn small danger onClick={() => setConfirmDel({ t: "c", id: c.id })}>Eliminar</Btn></div>
+              </div>
+            ))}
+            {clients.length === 0 && <div style={{ textAlign: "center", padding: 36, color: "#475569" }}>No hay clientes.</div>}
+          </div>
+        )}
+
+        {/* ═══ DATOS ═══ */}
+        {tab === "datos" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 14, color: "#94a3b8", margin: 0 }}>Carga de Datos</h3>
+              <div style={{ display: "flex", gap: 6 }}>
+                <Btn accent small onClick={() => { setImpPrev(null); setImpStat(""); setShowIM(true); }}>📥 Importar</Btn>
+                {clients.length > 0 && <Btn primary small onClick={() => openNR(selCl || clients[0].id)}>+ Manual</Btn>}
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 14 }}>{records.length} registros totales</div>
+            {clients.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {clients.map(cl => {
+                  const clR = records.filter(r => r.clientId === cl.id);
+                  const byMonth = [...new Set(clR.map(r => MONTHS[r.month] + " " + r.year))].sort();
+                  return (
+                    <div key={cl.id} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "12px 16px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: clR.length > 0 ? 10 : 0 }}>
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 12, fontFamily: "'Space Grotesk',sans-serif", color: "#e2e8f0", marginBottom: 4 }}>{cl.name}</div>
+                          <div style={{ fontSize: 10, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>
+                            {clR.length} registros
+                            {byMonth.length > 0 && <span style={{ color: "#94a3b8" }}> · {byMonth.join(" · ")}</span>}
+                            {clR.length === 0 && <span style={{ color: "#475569" }}> · Sin datos</span>}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          {clR.length > 0 && <Btn small danger onClick={() => setConfirmDel({ t: "cl_records", id: cl.id, name: cl.name, count: clR.length })}>🗑 Limpiar</Btn>}
+                          <Btn small onClick={() => openNR(cl.id)}>+ Manual</Btn>
+                        </div>
+                      </div>
+                      {clR.length > 0 && (
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: "'DM Mono',monospace" }}>
+                            <thead><tr style={{ borderBottom: "1px solid #1e293b" }}>
+                              {["Mes","Cat.","Ajuste","ST (Teórico)","$Ajuste","$OUT",""].map(h => (
+                                <th key={h} style={{ padding: "4px 8px", textAlign: h==="Mes"||h==="Cat."||h===""?"left":"right", color: "#475569", fontWeight: 500, fontSize: 8, textTransform: "uppercase" }}>{h}</th>
+                              ))}
+                            </tr></thead>
+                            <tbody>
+                              {clR.sort((a,b) => (a.year-b.year)||(a.month-b.month)||(a.category||"").localeCompare(b.category||"")).map(r => (
+                                <tr key={r.id} style={{ borderBottom: "1px solid #0f172a" }}>
+                                  <td style={{ padding: "4px 8px", color: "#94a3b8" }}>{MONTHS[r.month]} {r.year}</td>
+                                  <td style={{ padding: "4px 8px", color: "#a855f7" }}>{r.category === "_total" ? "Total" : r.category}</td>
+                                  <td style={{ padding: "4px 8px", textAlign: "right", color: r.ajuste < 0 ? "#fb7185" : "#34d399" }}>{fmt(r.ajuste)}</td>
+                                  <td style={{ padding: "4px 8px", textAlign: "right", color: r.stockTeorico > 0 ? "#60a5fa" : "#334155", fontWeight: r.stockTeorico > 0 ? 600 : 400 }}>{r.stockTeorico > 0 ? fmt(r.stockTeorico) : "—"}</td>
+                                  <td style={{ padding: "4px 8px", textAlign: "right", color: "#64748b" }}>{r.costoAjuste ? fmtM(r.costoAjuste) : "—"}</td>
+                                  <td style={{ padding: "4px 8px", textAlign: "right", color: "#64748b" }}>{r.costoFlowOut ? fmtM(r.costoFlowOut) : "—"}</td>
+                                  <td style={{ padding: "4px 8px" }}><IBtn onClick={() => setConfirmDel({ t: "r", id: r.id })} danger>✕</IBtn></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ INFO ═══ */}
+        {tab === "info" && (
+          <div style={{ maxWidth: 700 }}>
+            <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 14, color: "#94a3b8", marginBottom: 14 }}>Fórmulas y Cálculos</h3>
+            {[
+              { t: "Merma %", i: [{ m: "Unidades", f: "|Ajuste (u.)| / Base movimientos × 100" }, { m: "Valorizado", f: "|$Ajuste| / |$OUT| × 100" }] },
+              { t: "Nota de Crédito (Valorizada)", i: [{ m: "Allowance", f: "Tolerancia% × |$OUT acum.| (umbral negativo permitido)" }, { m: "NC", f: "max(0, (−$Ajuste) − Allowance). Solo si $Ajuste < 0 (faltante)" }, { m: "Signo", f: "Ajuste (+) = favorable/sobrante → sin NC. Ajuste (−) = faltante → potencial NC" }, { m: "Por cat.", f: "Se calcula independientemente por cada categoría" }] },
+              { t: "Penalidad (Unidades)", i: [{ m: "Excedente", f: "|Ajuste (u.)| − (Tolerancia% × Base movimientos)" }] },
+              { t: "Período personalizado", i: [{ m: "Config.", f: "Mes inicio + año relativo al cierre" }, { m: "Ejemplo", f: "Inicio Nov + año anterior → para 2026: Nov 2025 – Oct 2026" }] },
+            ].map((s, i) => (
+              <div key={i} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 11, padding: "14px 18px", marginBottom: 10 }}>
+                <div style={{ fontWeight: 600, fontSize: 12, fontFamily: "'Space Grotesk',sans-serif", marginBottom: 8, color: C.purple }}>{s.t}</div>
+                {s.i.map((x, j) => <div key={j} style={{ display: "flex", gap: 10, marginBottom: 4, fontSize: 11, fontFamily: "'DM Mono',monospace" }}><span style={{ color: "#64748b", minWidth: 70, flexShrink: 0 }}>{x.m}:</span><span style={{ color: "#94a3b8" }}>{x.f}</span></div>)}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ═══ MODALS ═══ */}
+      <Modal open={showIM} onClose={() => setShowIM(false)} title="Importar" width={600}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "#1e293b", borderRadius: 9, padding: 14, border: "2px dashed #334155", textAlign: "center" }}>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ display: "none" }} />
+            <Btn accent onClick={() => fileRef.current?.click()}>Seleccionar .xlsx o .csv</Btn>
+            <p style={{ fontSize: 10, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 6, marginBottom: 0 }}>Columnas: CLIENTE, MES, Categoría, Ajuste (Un.), $Ajuste, OUT (Un.), $OUT · Southbay: agregar columna Stock Teórico</p>
+          </div>
+          {impPrev && <div style={{ background: "#0f172a", borderRadius: 9, padding: "12px 14px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <div style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: C.emerald, fontWeight: 600 }}>Preview</div>
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <span style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>Duplicados:</span>
+                {[["skip","Omitir"],["replace","Reemplazar"]].map(([v,l]) => (
+                  <button key={v} onClick={() => setImpMode(v)} style={{ padding: "2px 9px", borderRadius: 5, border: impMode===v?"1.5px solid #a855f7":"1px solid #334155", background: impMode===v?"#a855f718":"transparent", color: impMode===v?"#a855f7":"#64748b", fontSize: 9, fontFamily:"'DM Mono',monospace", cursor:"pointer", fontWeight: impMode===v?600:400 }}>{l}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, fontFamily: "'DM Mono',monospace", color: "#94a3b8" }}>
+              <div>Filas: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{impPrev.totalRows}</span></div>
+              <div>Clientes: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{impPrev.clientNames.join(", ")}</span></div>
+              <div>Períodos: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{impPrev.months.join(", ")}</span></div>
+              <div>Valorizado: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{impPrev.hasValued ? "Sí" : "No"}</span></div>
+            </div>
+            {/* Period detection alerts */}
+            {impPrev.clientNames.map(name => {
+              const pd = impPrev.clientPeriods?.[name];
+              if (!pd?.detected) return null;
+              return (
+                <div key={name} style={{ marginTop: 8, padding: "8px 12px", background: "#22d3ee10", border: "1px solid #22d3ee30", borderRadius: 7, fontSize: 10, fontFamily: "'DM Mono',monospace" }}>
+                  <span style={{ color: C.cyan, fontWeight: 600 }}>⚙ {name}:</span>
+                  <span style={{ color: "#94a3b8" }}> Datos cruzan años → se configurará período personalizado desde <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{MONTHS[pd.startMonth]} ({pd.yearOffset === "prev" ? "año ant." : "mismo año"})</span>, cierre en <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{pd.closeYear}</span>. El selector se moverá a {pd.closeYear}.</span>
+                </div>
+              );
+            })}
+            <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}><Btn primary onClick={execImport}>Confirmar importación</Btn></div>
+          </div>}
+          {impStat && <div style={{ padding: "8px 12px", borderRadius: 7, background: impStat.startsWith("✓") ? "#34d39918" : "#f8717118", color: impStat.startsWith("✓") ? C.emerald : C.rose, fontSize: 11, fontFamily: "'DM Mono',monospace" }}>{impStat}</div>}
+        </div>
+      </Modal>
+
+      <Modal open={showCM} onClose={() => setShowCM(false)} title={editCl ? "Editar Cliente" : "Nuevo Cliente"} width={570}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <F label="Nombre" value={cn} onChange={setCn} placeholder="Ej: Pedidos Ya" />
+          <div style={{ display: "flex", gap: 8 }}><F label="Método cálculo" value={cm} onChange={setCm} options={CALC_METHODS.map(m => ({ value: m.id, label: m.label }))} /><F label="Penalidad" value={cPT} onChange={setCPT} options={PENALTY_TYPES.map(p => ({ value: p.id, label: p.label }))} /></div>
+          <div style={{ background: "#1e293b", borderRadius: 9, padding: "12px 14px" }}>
+            <div style={{ fontSize: 10, color: "#94a3b8", fontFamily: "'DM Mono',monospace", fontWeight: 600, marginBottom: 8, textTransform: "uppercase" }}>Tolerancias (%)</div>
+            <div style={{ display: "flex", gap: 8 }}><F label="Merma" value={cTD} onChange={setCTD} type="number" placeholder="0.10" step="0.01" /><F label="% Stock" value={cTS} onChange={setCTS} type="number" placeholder="—" step="0.01" /><F label="% Salidas" value={cTO} onChange={setCTO} type="number" placeholder="—" step="0.01" /></div>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11, color: "#94a3b8", fontFamily: "'DM Mono',monospace", cursor: "pointer" }}><input type="checkbox" checked={cCP} onChange={e => setCCP(e.target.checked)} /> Período personalizado (entre inventarios)</label>
+          {cCP && <div style={{ background: "#1e293b", borderRadius: 9, padding: "12px 14px" }}>
+            <div style={{ fontSize: 9, color: "#94a3b8", fontFamily: "'DM Mono',monospace", fontWeight: 600, marginBottom: 6, textTransform: "uppercase" }}>Inicio del período</div>
+            <div style={{ display: "flex", gap: 8 }}><F label="Mes" value={cPSM} onChange={setCPSM} options={MONTHS.map((m, i) => ({ value: i.toString(), label: m }))} /><F label="Año" value={cPSY} onChange={setCPSY} options={[{ value: "prev", label: "Año anterior al cierre" }, { value: "same", label: "Mismo año del cierre" }]} /></div>
+            <div style={{ fontSize: 9, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 6 }}>Ej: Nov + año anterior → 2026 = Nov 2025 – Oct 2026</div>
+          </div>}
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11, color: "#94a3b8", fontFamily: "'DM Mono',monospace", cursor: "pointer" }}><input type="checkbox" checked={cUseCat} onChange={e => setCUseCat(e.target.checked)} /> Mide por categorías</label>
+          {cUseCat && <F label="Categorías (coma)" value={cCats} onChange={setCCats} placeholder="Ej: Beverages, Snacks" />}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}><Btn onClick={() => setShowCM(false)}>Cancelar</Btn><Btn primary onClick={saveCl} disabled={!cn.trim()}>Guardar</Btn></div>
+        </div>
+      </Modal>
+
+      <Modal open={showRM} onClose={() => setShowRM(false)} title={editRec ? "Editar Registro" : "Nuevo Registro"} width={560}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <F label="Cliente" value={rCl} onChange={v => { setRCl(v); const cl = clients.find(c => c.id === v); if (cl) setRMt(cl.method); setRCat("_total"); }} options={clients.map(c => ({ value: c.id, label: c.name }))} />
+            <F label="Año" value={rYr} onChange={v => setRYr(Number(v))} small options={YEARS.map(y => ({ value: y, label: y.toString() }))} />
+            <F label="Mes" value={rMo} onChange={v => setRMo(Number(v))} small options={MONTHS.map((m, i) => ({ value: i, label: m }))} />
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <F label="Método" value={rMt} onChange={setRMt} options={CALC_METHODS.map(m => ({ value: m.id, label: m.label }))} />
+            {(() => { const cl = clients.find(c => c.id === rCl); return cl?.useCategories && cl.categories?.length ? <F label="Categoría" value={rCat} onChange={setRCat} options={[{ value: "_total", label: "Total" }, ...cl.categories.map(c => ({ value: c, label: c }))]} /> : null; })()}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <F label="Stock Real" value={rSt} onChange={setRSt} type="number" placeholder="0" />
+            {(() => { const cl = clients.find(c => c.id === rCl); return cl?.method === "stock_teorico" ? <F label="Stock Teórico (CYC)" value={rST} onChange={setRST} type="number" placeholder="0" /> : <F label="Uds. IN" value={rIn} onChange={setRIn} type="number" placeholder="0" />; })()}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {(() => { const cl = clients.find(c => c.id === rCl); return cl?.method !== "stock_teorico" ? <F label="Uds. OUT" value={rOut} onChange={setROut} type="number" placeholder="0" /> : null; })()}
+            <F label="Ajuste (u.)" value={rAdj} onChange={setRAdj} type="number" placeholder="0" />
+          </div>
+          {(() => { const cl = clients.find(c => c.id === rCl); return cl?.penaltyType === "valued" ? <div style={{ background: "#1e293b", borderRadius: 9, padding: "10px 14px" }}>
+            <div style={{ fontSize: 9, color: C.cyan, fontFamily: "'DM Mono',monospace", fontWeight: 600, marginBottom: 6, textTransform: "uppercase" }}>Costos Reposición</div>
+            <div style={{ display: "flex", gap: 8 }}><F label="$Ajuste (cto. repos. merma)" value={rCM} onChange={setRCM} type="number" prefix="$" step="0.01" /><F label="$OUT (cto. repos. flujo OUT)" value={rCF} onChange={setRCF} type="number" prefix="$" step="0.01" /></div>
+          </div> : null; })()}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}><Btn onClick={() => setShowRM(false)}>Cancelar</Btn><Btn primary onClick={saveRec}>Guardar</Btn></div>
+        </div>
+      </Modal>
+
+      <Modal open={!!confirmDel} onClose={() => setConfirmDel(null)} title="Confirmar" width={380}>
+        <p style={{ fontSize: 12, color: "#94a3b8", fontFamily: "'DM Mono',monospace", marginBottom: 16 }}>
+          {confirmDel?.t === "c" ? "¿Eliminar cliente y todos sus registros?" :
+           confirmDel?.t === "cl_records" ? `¿Limpiar los ${confirmDel.count} registros de ${confirmDel.name}? El cliente no se elimina, solo sus datos.` :
+           "¿Eliminar registro?"}
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+          <Btn onClick={() => setConfirmDel(null)}>Cancelar</Btn>
+          <Btn danger onClick={() => {
+            if (confirmDel.t === "c") delCl(confirmDel.id);
+            else if (confirmDel.t === "cl_records") { sR(records.filter(r => r.clientId !== confirmDel.id)); setConfirmDel(null); }
+            else delRec(confirmDel.id);
+          }}>Eliminar</Btn>
+        </div>
+      </Modal>
+
+      <Modal open={showSbSnapM} onClose={() => { setShowSbSnapM(false); setSbSnapPrev(null); setSbSnapStat(""); }} title="📦 Actualizar foto de stock – Southbay" width={620}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ padding: "8px 12px", background: "#1e293b", borderRadius: 8, fontSize: 10, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>
+            Snapshot activo: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{sbSnapshot.date}</span> · <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{sbSnapshot.categories.length} categorías</span>
+          </div>
+          <div style={{ background: "#1e293b", borderRadius: 9, padding: 14, border: "2px dashed #334155", textAlign: "center" }}>
+            <input ref={sbSnapFileRef} type="file" accept=".xlsx,.xls" onChange={handleSbSnapFile} style={{ display: "none" }} />
+            <Btn accent onClick={() => sbSnapFileRef.current?.click()}>Seleccionar Stock Southbay.xlsx</Btn>
+            <p style={{ fontSize: 10, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 6, marginBottom: 0 }}>Requiere columnas: <span style={{ color: "#94a3b8" }}>Tipo · Categoría · CANTIDAD · Total</span></p>
+          </div>
+          {sbSnapPrev && (
+            <div style={{ background: "#0f172a", borderRadius: 9, padding: "14px 16px", border: "1px solid #22d3ee30" }}>
+              <div style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3ee", fontWeight: 600, marginBottom: 10 }}>✓ Archivo procesado — Preview</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, fontSize: 10, fontFamily: "'DM Mono',monospace", color: "#94a3b8", marginBottom: 12 }}>
+                <div>Archivo: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{sbSnapPrev.filename}</span></div>
+                <div>Filas: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{(sbSnapPrev.totalRows||0).toLocaleString("es-AR")}</span></div>
+                <div>Categorías: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{sbSnapPrev.catCount}</span></div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+                {sbSnapPrev.categories.map((cat, i) => {
+                  const perdPct = cat.stock > 0 ? ((cat.lost + cat.reubica) / cat.stock * 100).toFixed(3) : "—";
+                  return (
+                    <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 70px 70px 70px 90px", gap: 6, fontSize: 9, fontFamily: "'DM Mono',monospace", padding: "4px 6px", background: "#1e293b20", borderRadius: 5, alignItems: "center" }}>
+                      <div style={{ color: "#e2e8f0", fontWeight: 600 }}>{cat.name}</div>
+                      <div style={{ textAlign: "right", color: "#64748b" }}>{(Number(cat.stock)||0).toLocaleString("es-AR")} u.</div>
+                      <div style={{ textAlign: "right", color: "#fb7185" }}>Lost: {(Number(cat.lost)||0).toLocaleString("es-AR")}</div>
+                      <div style={{ textAlign: "right", color: "#fbbf24" }}>Reub: {(Number(cat.reubica)||0).toLocaleString("es-AR")}</div>
+                      <div style={{ textAlign: "right", color: "#94a3b8" }}>% perd: {perdPct}%</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>Reemplaza snapshot de {sbSnapshot.date}</span>
+                <Btn primary onClick={execSbSnapImport}>Confirmar e importar</Btn>
+              </div>
+            </div>
+          )}
+          {sbSnapStat && (
+            <div style={{ padding: "8px 12px", borderRadius: 7, background: sbSnapStat.startsWith("✓") ? "#34d39918" : "#f8717118", color: sbSnapStat.startsWith("✓") ? "#34d399" : "#fb7185", fontSize: 11, fontFamily: "'DM Mono',monospace" }}>{sbSnapStat}</div>
+          )}
+        </div>
+      </Modal>
+
+      <Modal open={showSnapM} onClose={() => { setShowSnapM(false); setSnapPrev(null); setSnapStat(""); }} title="📦 Actualizar foto de stock" width={620}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ padding: "8px 12px", background: "#1e293b", borderRadius: 8, fontSize: 10, fontFamily: "'DM Mono',monospace", color: "#64748b" }}>
+            Snapshot activo: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{snapshot.date}</span> · <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{snapshot.categories.length} categorías</span>
+          </div>
+          <div style={{ background: "#1e293b", borderRadius: 9, padding: 14, border: "2px dashed #334155", textAlign: "center" }}>
+            <input ref={snapFileRef} type="file" accept=".xlsx,.xls" onChange={handleSnapFile} style={{ display: "none" }} />
+            <Btn accent onClick={() => snapFileRef.current?.click()}>Seleccionar Stock.xlsx</Btn>
+            <p style={{ fontSize: 10, color: "#475569", fontFamily: "'DM Mono',monospace", marginTop: 6, marginBottom: 0 }}>
+              Requiere columnas: <span style={{ color: "#94a3b8" }}>Tipo · Categoría · CANTIDAD · Total</span>
+            </p>
+          </div>
+          {snapPrev && (
+            <div style={{ background: "#0f172a", borderRadius: 9, padding: "14px 16px", border: "1px solid #22d3ee30" }}>
+              <div style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3ee", fontWeight: 600, marginBottom: 10 }}>✓ Archivo procesado — Preview</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, fontSize: 10, fontFamily: "'DM Mono',monospace", color: "#94a3b8", marginBottom: 12 }}>
+                <div>Archivo: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{snapPrev.filename}</span></div>
+                <div>Filas totales: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{(snapPrev.totalRows||0).toLocaleString("es-AR")}</span></div>
+                <div>Categorías: <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{snapPrev.catCount}</span></div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 240, overflowY: "auto" }}>
+                {snapPrev.categories.map((c, i) => {
+                  const perdPct = c.stock > 0 ? ((c.lost + c.reubica) / c.stock * 100).toFixed(3) : "—";
+                  const simVal = c.lostVal + c.reubicaVal + c.roturaVal;
+                  return (
+                    <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 70px 70px 70px 90px", gap: 6, fontSize: 9, fontFamily: "'DM Mono',monospace", padding: "4px 6px", background: "#1e293b20", borderRadius: 5, alignItems: "center" }}>
+                      <div style={{ color: "#e2e8f0", fontWeight: 600 }}>{c.name}</div>
+                      <div style={{ textAlign: "right", color: "#64748b" }}>{(Number(c.stock)||0).toLocaleString("es-AR")} u.</div>
+                      <div style={{ textAlign: "right", color: "#fb7185" }}>Lost: {(Number(c.lost)||0).toLocaleString("es-AR")}</div>
+                      <div style={{ textAlign: "right", color: "#fbbf24" }}>Reub: {(Number(c.reubica)||0).toLocaleString("es-AR")}</div>
+                      <div style={{ textAlign: "right", color: "#94a3b8" }}>% perd: {perdPct}%</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 9, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>Se reemplazará el snapshot de {snapshot.date}</span>
+                <Btn primary onClick={execSnapImport}>Confirmar e importar</Btn>
+              </div>
+            </div>
+          )}
+          {snapStat && (
+            <div style={{ padding: "8px 12px", borderRadius: 7, background: snapStat.startsWith("✓") ? "#34d39918" : "#f8717118", color: snapStat.startsWith("✓") ? "#34d399" : "#fb7185", fontSize: 11, fontFamily: "'DM Mono',monospace" }}>
+              {snapStat}
+            </div>
+          )}
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
